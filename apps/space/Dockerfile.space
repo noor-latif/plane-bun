@@ -65,6 +65,7 @@ COPY --from=builder /app/out/bun.lock ./bun.lock
 # Copy full directory structure before fetch to ensure all package.json files are available
 COPY --from=builder /app/out/full/ .
 COPY turbo.json turbo.json
+COPY bunfig.toml bunfig.toml
 
 # Fetch dependencies to cache store, then install offline with dev deps
 RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache NODE_ENV=development bun install --frozen-lockfile
