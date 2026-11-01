@@ -27,7 +27,7 @@ Sources distilled from: Microsoft Localization Style Guides, Mozilla L10n, Unico
 - Adding a new key to any `packages/i18n/src/locales/en/*.json`
 - Renaming or rewording an English value (every target is now stale)
 - Adding a new language (copy from `en/`, then translate each file)
-- Syncing after `pnpm --filter @plane/i18n run sync:check` reports drift
+- Syncing after `bun --filter @plane/i18n run sync:check` reports drift
 - Reviewing any PR that touches `packages/i18n/src/locales/`
 
 Skip only for trivial English-only typo fixes that don't change meaning or length meaningfully.
@@ -460,8 +460,8 @@ When reviewing a translation — yours or an AI's — score against these catego
 1. Add to `packages/i18n/src/locales/en/<namespace>.json` first. (If the namespace file does not yet exist, see **Add a new namespace** below — that case has extra steps.)
 2. Use in the component via `t("my.new_key")`.
 3. Translate into every target locale present in `src/locales/` — one file at a time. **Do not** copy the English value into the non-English files as a shortcut — `sync-check` treats presence as synced and will silently ship English copy to every locale.
-4. Run `pnpm --filter @plane/i18n run generate:types` (or let the build do it).
-5. Run `pnpm --filter @plane/i18n run sync:check` — expect `0 missing, 0 stale, 0 collisions`.
+4. Run `bun --filter @plane/i18n run generate:types` (or let the build do it).
+5. Run `bun --filter @plane/i18n run sync:check` — expect `0 missing, 0 stale, 0 collisions`.
 6. Spot-check one non-Latin locale manually for punctuation/plural correctness.
 
 ### Add a new namespace
@@ -472,8 +472,8 @@ A "namespace" is a top-level JSON file (e.g. `common.json`, `auth.json`, `epic.j
 2. Create `<namespace>.json` in **every** locale directory under `packages/i18n/src/locales/` — start with `en/<namespace>.json` (the source of truth), then create the file in all 18 target locales. An empty `{}` is fine for the targets at this step; `sync-check` will report missing keys as you add them in step 4.
 3. Add at least one key in `en/<namespace>.json` so the namespace has content.
 4. Translate every key from `en/<namespace>.json` into each target locale — apply every rule in this skill.
-5. Run `pnpm --filter @plane/i18n run generate:types` to regenerate the `TTranslationKeys` union so component-level `t()` calls type-check.
-6. Run `pnpm --filter @plane/i18n run sync:check` — expect `0 missing, 0 stale, 0 collisions`.
+5. Run `bun --filter @plane/i18n run generate:types` to regenerate the `TTranslationKeys` union so component-level `t()` calls type-check.
+6. Run `bun --filter @plane/i18n run sync:check` — expect `0 missing, 0 stale, 0 collisions`.
 7. Use the new namespace from a component via the namespace-prefixed key (e.g. `t("<namespace>.my_key")`) and spot-check the rendered UI in at least one non-Latin locale.
 
 ### Update an English value
@@ -497,13 +497,13 @@ The meaning changed — every target is now stale even if the key still exists. 
 
 ```bash
 # Regenerate the TTranslationKeys union (auto on build)
-pnpm --filter @plane/i18n run generate:types
+bun --filter @plane/i18n run generate:types
 
 # Report drift
-pnpm --filter @plane/i18n run sync:check
+bun --filter @plane/i18n run sync:check
 
 # Same, exit 1 on drift (for CI)
-pnpm --filter @plane/i18n run check:sync
+bun --filter @plane/i18n run check:sync
 ```
 
 ## Quick Reference

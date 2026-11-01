@@ -208,7 +208,7 @@
     "check:format": "turbo run check:format",
     "check:types": "turbo run check:types",
     "prepare": "husky",
-    "doctor": "npx react-doctor@latest"
+    "doctor": "bunx react-doctor@latest"
   },
   "devDependencies": {
     "husky": "catalog:",

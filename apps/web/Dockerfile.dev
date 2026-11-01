@@ -9,6 +9,7 @@ COPY . .
 COPY --from=oven/bun:1.4-alpine /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
 RUN bun install
+RUN bun run prepare
 
 EXPOSE 3000
 VOLUME [ "/app/node_modules", "/app/web/node_modules" ]
