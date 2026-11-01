@@ -117,3 +117,12 @@ packages/i18n/src/types/keys.generated.ts
 
 # Local security notes (not for version control)
 /security/
+
+# Flox: the environment definition is tracked (.flox/env/manifest.toml + lock);
+# runtime state and service data are machine-local.
+.flox/data/
+.flox/env.json
+.flox/env.lock
+.flox/run/
+.flox/log/
+.flox/cache/

@@ -1,0 +1,172 @@
+## Plane — self-hosted local stack from the Flox Catalog.
+##
+##   flox activate          # toolchain + generated .env files
+##   flox services start    # postgres, valkey, rabbitmq, minio, api, web
+##
+## No Docker, no system packages, no repo edits. Data lives in .flox/data.
+
+schema-version = "1.19.0"
+
+description = '''
+  Plane, self-hosted locally from the Flox Catalog.
+
+  Toolchain: Node 22, pnpm 11.10.0, Python 3.12, uv.
+  Services: PostgreSQL 15, Valkey, RabbitMQ, MinIO, the Django API and the
+  four React Router apps.
+
+  Get everything up:
+
+      flox activate
+      flox services start
+
+  Register the instance admin at http://localhost:3001/god-mode/ and then log
+  in at http://localhost:3000. Service data lives in .flox/data.
+'''
+
+[install]
+nodejs.pkg-path = "nodejs_22"
+pnpm.pkg-path = "pnpm"
+pnpm.version = "11.10.0"
+pnpm.pkg-group = "pnpm"
+python312.pkg-path = "python312"
+postgresql.pkg-path = "postgresql_15"
+valkey.pkg-path = "valkey"
+rabbitmq-server.pkg-path = "rabbitmq-server"
+minio.pkg-path = "minio"
+
+[hook]
+on-activate = '''
+  set -u
+  root="${FLOX_ENV_PROJECT:?}"
+  export PLANE_DATA="$root/.flox/data"
+
+  mkdir -p "$PLANE_DATA"/pg "$PLANE_DATA"/valkey "$PLANE_DATA"/rabbitmq \
+           "$PLANE_DATA"/rabbitmq/mnesia "$PLANE_DATA"/rabbitmq/log \
+           "$PLANE_DATA"/rabbitmq/home "$PLANE_DATA"/minio "$PLANE_DATA"/logs \
+           "$PLANE_DATA"/uv/bin
+
+  # uv is provisioned by bootstrap at the version apps/api/pyproject.toml
+  # requires: the catalog carries no matching build. Putting the directory on
+  # PATH now means later services pick the binary up once bootstrap installs it.
+  export PATH="$PLANE_DATA/uv/bin:$PATH"
+  export RABBITMQ_MNESIA_BASE="$PLANE_DATA/rabbitmq/mnesia"
+  export RABBITMQ_LOG_BASE="$PLANE_DATA/rabbitmq/log"
+  # Loopback-only listener; RABBITMQ_NODE_IP_ADDRESS is unreliable in 4.x.
+  printf 'listeners.tcp.default = 127.0.0.1:5672\n' > "$PLANE_DATA/rabbitmq/rabbitmq.conf"
+  export RABBITMQ_CONFIG_FILE="$PLANE_DATA/rabbitmq/rabbitmq.conf"
+
+  # Front-end env files are plain copies; the examples already point at
+  # localhost:8000 / 3000 / 3001 / 3002 / 3100.
+  for app in web admin space live; do
+    if [ ! -f "$root/apps/$app/.env" ] && [ -f "$root/apps/$app/.env.example" ]; then
+      cp "$root/apps/$app/.env.example" "$root/apps/$app/.env"
+    fi
+  done
+
+  # The API env is the one that needs values: catalog services run on host
+  # ports, and PostgreSQL gets 5433 so the environment never collides with a
+  # PostgreSQL already running on the machine.
+  if [ ! -f "$root/apps/api/.env" ] && [ -f "$root/apps/api/.env.example" ]; then
+    secret="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 50)"
+    sed -e 's/^POSTGRES_HOST=.*/POSTGRES_HOST="127.0.0.1"/' \
+        -e 's/^POSTGRES_PORT=.*/POSTGRES_PORT=5433/' \
+        -e 's/^REDIS_HOST=.*/REDIS_HOST="127.0.0.1"/' \
+        -e 's/^RABBITMQ_HOST=.*/RABBITMQ_HOST="127.0.0.1"/' \
+        -e 's|^DATABASE_URL=.*|DATABASE_URL=postgresql://plane:plane@127.0.0.1:5433/plane|' \
+        -e 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379/|' \
+        "$root/apps/api/.env.example" > "$root/apps/api/.env"
+    printf 'SECRET_KEY="%s"\n' "$secret" >> "$root/apps/api/.env"
+  fi
+'''
+
+[services.postgres]
+command = '''
+  set -euo pipefail
+  PGDATA="$PLANE_DATA/pg"
+  if [ ! -f "$PGDATA/PG_VERSION" ]; then
+    initdb -D "$PGDATA" -U plane --auth=trust >/dev/null
+  fi
+  exec postgres -D "$PGDATA" -p 5433 -k "$PGDATA"
+'''
+shutdown.timeout-seconds = 30
+
+[services.valkey]
+command = 'exec valkey-server --bind 127.0.0.1 --port 6379 --dir "$PLANE_DATA/valkey" --appendonly no'
+
+[services.rabbitmq]
+command = '''
+  export HOME="$PLANE_DATA/rabbitmq/home"
+  exec rabbitmq-server
+'''
+shutdown.timeout-seconds = 30
+
+[services.minio]
+command = 'exec minio server "$PLANE_DATA/minio" --address 127.0.0.1:9000 --console-address 127.0.0.1:9090'
+vars.MINIO_ROOT_USER = "access-key"
+vars.MINIO_ROOT_PASSWORD = "secret-key"
+
+[services.bootstrap]
+command = '''
+  set -euo pipefail
+  root="$FLOX_ENV_PROJECT"
+
+  # The catalog has no uv build matching apps/api/pyproject.toml's
+  # required-version, so fetch that exact release once.
+  want="$(sed -n 's/^required-version *= *"==\(.*\)"/\1/p' "$root/apps/api/pyproject.toml")"
+  have="$(uv --version 2>/dev/null | awk '{print $2}' || true)"
+  if [ -n "$want" ] && [ "$have" != "$want" ]; then
+    curl -LsSf "https://astral.sh/uv/$want/install.sh" \
+      | env UV_INSTALL_DIR="$PLANE_DATA/uv/bin" INSTALLER_NO_MODIFY_PATH=1 sh
+  fi
+
+  pnpm install --frozen-lockfile
+
+  for _ in $(seq 60); do
+    pg_isready -h 127.0.0.1 -p 5433 -U plane >/dev/null 2>&1 && break
+    sleep 1
+  done
+  createdb -h 127.0.0.1 -p 5433 -U plane plane 2>/dev/null || true
+
+  # The API connects as plane/plane on vhost plane. rabbitmqctl needs the same
+  # HOME (Erlang cookie) as the service; readiness is polled, not assumed.
+  (
+    export HOME="$PLANE_DATA/rabbitmq/home"
+    for _ in $(seq 60); do
+      rabbitmqctl -q status >/dev/null 2>&1 && break
+      sleep 1
+    done
+    if rabbitmqctl -q list_users | cut -f1 | grep -qx plane; then
+      rabbitmqctl -q change_password plane plane
+    else
+      rabbitmqctl -q add_user plane plane
+    fi
+    rabbitmqctl -q add_vhost plane || true
+    rabbitmqctl -q set_permissions -p plane plane ".*" ".*" ".*"
+  )
+
+  uv sync --project "$root/apps/api"
+
+  set -a; . "$root/apps/api/.env"; set +a
+  cd "$root/apps/api"
+  uv run python manage.py migrate --settings=plane.settings.local
+'''
+depends-on.postgres = { condition = "process_started" }
+depends-on.rabbitmq = { condition = "process_started" }
+shutdown.timeout-seconds = 10
+
+[services.api]
+command = '''
+  set -a; . "$FLOX_ENV_PROJECT/apps/api/.env"; set +a
+  for _ in $(seq 60); do
+    curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && break
+    sleep 1
+  done
+  cd "$FLOX_ENV_PROJECT/apps/api"
+  exec uv run bash bin/docker-entrypoint-api-local.sh
+'''
+depends-on.bootstrap = { condition = "process_completed_successfully" }
+depends-on.minio = { condition = "process_started" }
+
+[services.web]
+command = 'exec pnpm dev'
+depends-on.bootstrap = { condition = "process_completed_successfully" }
