@@ -1,0 +1,3 @@
+# Bun configuration. Replaces pnpm-workspace.yaml policy settings.
+[install]
+frozenLockfile = true
