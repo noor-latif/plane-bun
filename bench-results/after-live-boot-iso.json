@@ -1,0 +1,22 @@
+{
+ "boot_s": 0.92,
+ "idle": {
+  "seconds": 12.28,
+  "avg_tree_pss_bytes": 206998098,
+  "p95_tree_pss_bytes": 207121408,
+  "cpu_percent": 0.6
+ },
+ "ws": {
+  "url": "ws://127.0.0.1:3100/live",
+  "attempted": 200,
+  "ok": 200,
+  "fail": 0,
+  "handshake_ms": {
+   "p50": 0,
+   "p95": 1,
+   "max": 8
+  },
+  "conns_per_s": 2153
+ },
+ "cmd": "bun run --env-file=.env ."
+}

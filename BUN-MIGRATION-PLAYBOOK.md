@@ -95,6 +95,12 @@ recorded finding under bun's hoisted layout, not an automatic STOP. Do not
 10. **engines**: Bun ignores `engines.node` (issue #5846). Vite/tsdown/oxlint
     binaries still execute on Node via their shebangs regardless of PM — so
     Node remains needed for builds/tests/lint. Keep `engines.node`.
+11. **Linker**: bun's back-compat default is **hoisted** for projects made
+    pre-1.3.2; they never get the isolated linker unless configured. The
+    deleted `.npmrc` mandated `node-linker=isolated`, so the migration must
+    set `linker = "isolated"` in bunfig (§3.2) — measured: build --force
+    39.0 s isolated vs 67.9 s hoisted vs 49–55 s pnpm baseline.
+    https://bun.com/docs/pm/isolated-installs
 
 ## 2. Phase 1 — Branch, install migration
 
@@ -358,9 +364,13 @@ node:22-alpine stages add
   it; the tag exists, musl, carries 1.4.4). This keeps Node available for the
   vite/tsdown/tsc shebangs. Use `bunx turbo@<pinned> prune/build` — no global
   installs (bun's global bin dir is not on PATH in these stages). The
-  installer COPY keeps the lockfile line, renamed:
-  `COPY --from=builder /app/out/bun.lock ./bun.lock` (turbo ≥2.5 emits
-  bun.lock there). Replace the `pnpm fetch` + `pnpm install --offline
+installer COPY keeps the lockfile line, renamed:
+`COPY --from=builder /app/out/bun.lock ./bun.lock` (turbo ≥2.5 emits
+bun.lock there). **Copy `bunfig.toml` into every pruned installer next to
+`turbo.json`** (`COPY bunfig.toml bunfig.toml`) — the pruned context only
+contains files the Dockerfile copies, and without bunfig the in-image
+`bun install` silently reverts to the hoisted layout while host/CI installs
+use isolated (verified both ways). Replace the `pnpm fetch` + `pnpm install --offline
 --frozen-lockfile` cache-mount pairs with a single
   `RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache bun install --frozen-lockfile`
   (space/admin: prefix `NODE_ENV=development` to keep dev deps).
