@@ -65,14 +65,17 @@ on either side of the comparison. Gate rule (§8) accounts for it. Do not
    `router>path-to-regexp` indirect form used here).
    https://bun.com/docs/pm/overrides
 4. **minimumReleaseAge**: Bun 1.3+ reads it from **bunfig.toml** only. This
-   repo has NO active minimumReleaseAge — only `minimumReleaseAgeExclude`
-   (8 entries) → move to bunfig `[install] minimumReleaseAgeExcludes`
-   (trailing **s**).
+   repo has NO active minimumReleaseAge — the 8 `minimumReleaseAgeExclude`
+   entries are dormant without a policy, so they do NOT migrate (§3.2
+   carries only the frozenLockfile default). If a policy is reintroduced,
+   the exclude key is `minimumReleaseAgeExcludes` (trailing **s**).
 5. **allowBuilds → trustedDependencies**: Bun's analog is
    `trustedDependencies` in root package.json; defining it **REPLACES** Bun's
-   curated default allowlist. pnpm's `sharp: false` deny-entry has no Bun
-   equivalent; include `sharp` in the trusted list (its install script only
-   downloads platform binaries) so behavior matches pnpm's baseline builds.
+   curated default allowlist. pnpm's `sharp: false` deny-entry stays a deny
+   by omission: `sharp@0.35.5` ships platform binaries as
+   optionalDependencies prebuilds and has **no install script** in this
+   graph, so sharp is EXCLUDED from the trusted list (§3.1.3) — nothing to
+   run on either side.
    https://bun.com/docs/pm/lifecycle
 6. **Turbo**: `turbo prune --docker` emits bun.lock since 2.5, stable 2.6+
    (repo has 2.10.11). Prune regression existed in 2.8.12–2.8.15: never
@@ -140,10 +143,12 @@ to make install pass — they are CVE pins.
    install ran lifecycle scripts for `@parcel/watcher` and
    `msgpackr-extract` (pnpm applies built-in defaults on top of its
    allow-map); Bun blocks everything not in `trustedDependencies`, so after
-   this edit `bun pm untrusted` must report **sharp only** (it did report
-   `@parcel/watcher` alone before the edit — that block is what this list
-   resolves). Any other package on either side of the run/blocked split that
-   differs from the baseline install log = STOP and report.
+   this edit `bun pm untrusted` must report **nothing** and the install must
+   print `Blocked 0 postinstall` (before the edit it reported exactly
+   `@parcel/watcher` — that block is what this list resolves; sharp was
+   never in the run/blocked split because it has no script to run). Any
+   other package on either side of the run/blocked split that differs from
+   the baseline install log = STOP and report.
 4. Workspaces (single authoritative form — an array cannot carry `catalog`,
    so the object form wins). Use an **explicit package list**, not `apps/*`:
    ```jsonc
@@ -272,19 +277,31 @@ with:
   with:
     bun-version-file: .bun-version
 
+- name: Set up Node.js
+  uses: actions/setup-node@v6
+  with:
+    node-version-file: .node-version
+
 - name: Install dependencies
   run: bun install --frozen-lockfile
 ```
 
-(setup-bun has built-in cache; the manual store-cache dance is redundant.)
+(setup-bun = install + script runner; KEEP setup-node — vite/tsdown/tsc/
+oxlint still execute on Node via their shebangs under `bun run`, and the
+runner's preinstalled Node is not pinned to `.node-version` (tsdown needs
+^22.18+). Same logic as the §6 Docker builder stage. setup-bun caches its
+own downloads; only the pnpm store-cache steps go.)
 
 Also per workflow:
 
-- `i18n-sync-check.yml`: same replacement; `pnpm dlx tsx …` → `bunx tsx …`;
-  drop the corepack step.
+- `i18n-sync-check.yml`: same replacement (bun + setup-node both kept);
+  `pnpm dlx tsx …` → `bunx tsx …`; drop only the corepack + pnpm-store
+  steps.
 - `check-version.yml`: it only needs to read package.json version — replace
   setup-node with setup-bun (bun-version-file: .bun-version) and
-  `node -p "require('./package.json').version"` stays valid JS.
+  `node -p "require('./package.json').version"` →
+  `bun -p "require('./package.json').version"` (setup-bun installs NO node;
+  `bun -p` verified on 1.4.4).
 
 New file `.bun-version` at repo root, single line: `1.4.4`.
 
@@ -300,6 +317,16 @@ cutover commit** that deletes `pnpm-workspace.yaml` + `.npmrc` +
 1–3 BEFORE that commit, and expect the fork's Actions to run against the
 pushed result.
 
+**Hooks die without this** (in the same cutover commit): `.husky/pre-commit`
+contains `pnpm lint-staged` and the `lint-staged` config in root
+package.json runs `pnpm exec oxfmt …` / `pnpm exec oxlint …`. After pnpm is
+gone the next `git commit` in any checkout fails. Fix:
+`.husky/pre-commit` → `bun lint-staged`; both config entries →
+`bun oxfmt --no-error-on-unmatched-pattern` and
+`bun oxlint --fix --deny-warnings` (`bun <bin>` resolves local
+`node_modules/.bin`; official husky guide uses the same form). Verify by
+making the cutover commit itself — it must pass the hook.
+
 `check-version.yml` note: it runs `node -p "require('./package.json').version"`.
 setup-bun installs no `node` binary — switch that line to
 `bun -p "require('./package.json').version"` (verified: `bun -p` exists on
@@ -308,19 +335,25 @@ workflow if you prefer zero risk there.
 
 ## 6. Phase 5 — Docker
 
-Rule per file: builder/installer stages switch corepack-pnpm → bun
-(`COPY --from=oven/bun:1.4-alpine /bin/bun /usr/local/bin/bun` into the
-node:22-alpine builder is acceptable and keeps Node available for
-vite/tsdown shebangs; alternatively use `oven/bun:1.4-alpine` as builder base
-and add node only if a shebang needs it — do NOT add node unless a build
-fails without it). `turbo prune` lines stay; turbo emits `out/bun.lock` now
-(§1.6) — update the installer COPY path from `out/pnpm-lock.yaml` to
-`out/bun.lock`, and replace
-`pnpm fetch` + `pnpm install --offline --frozen-lockfile` cache-mount pairs
-with a single `RUN bun install --frozen-lockfile` (drop the
-`--mount=type=cache,id=pnpm-store` lines; Bun's global cache works with
-`--cache-dir` if you want a cache mount, but plain layer-cached install is
-fine at this repo's size).
+Rule per file: builder/installer stages switch corepack-pnpm → bun. Into the
+node:22-alpine stages add
+`COPY --from=oven/bun:1.4-alpine /usr/local/bin/bun /usr/local/bin/bun`
+
+- `RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx` (verified: the binary
+  lives at `/usr/local/bin/bun`; `bunx` is only a symlink — copy or recreate
+  it; the tag exists, musl, carries 1.4.4). This keeps Node available for the
+  vite/tsdown/tsc shebangs. Use `bunx turbo@<pinned> prune/build` — no global
+  installs (bun's global bin dir is not on PATH in these stages). The
+  installer COPY keeps the lockfile line, renamed:
+  `COPY --from=builder /app/out/bun.lock ./bun.lock` (turbo ≥2.5 emits
+  bun.lock there). Replace the `pnpm fetch` + `pnpm install --offline
+--frozen-lockfile` cache-mount pairs with a single
+  `RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache bun install --frozen-lockfile`
+  (space/admin: prefix `NODE_ENV=development` to keep dev deps).
+  `.flox/env/manifest.lock` is TRACKED and must be regenerated (network) in
+  the same commit as the manifest edit — `.flox/env.json` is gitignored, so a
+  fresh clone cannot run `flox activate` until the lock resolves (record the
+  prerequisite in the PR body).
 
 Runtime stages:
 
@@ -353,6 +386,8 @@ Runtime stages:
 ```toml
 [install]
 bun.pkg-path = "bun"
+bun.version = "1.4.2"
+bun.pkg-group = "bun"   # REQUIRED: toplevel co-install with nodejs_22 is too tight
 nodejs.pkg-path = "nodejs_22"      # keep: vite/oxlint/vitest shebangs need node
 pnpm.pkg-path = "pnpm"             # DELETE these three lines in the same edit
 pnpm.version = "11.10.0"
@@ -435,17 +470,35 @@ stop and hand back the branch with the failure log.
 
 ## 9. Results table (fill after Phase 7)
 
-| Metric                        | baseline (pnpm/node) | after (bun) | Δ   |
-| ----------------------------- | -------------------- | ----------- | --- |
-| cold install median (3×)      | 9.2 s                |             |     |
-| warm install (3×)             | 1.75 s               |             |     |
-| node_modules                  | 816 MB               |             |     |
-| build --force median          | 55.0 s               |             |     |
-| build peak tree PSS           | 4.29 GB              |             |     |
-| live boot → 200               | 2.41 s               |             |     |
-| live idle PSS (12 s)          | 252 MB               |             |     |
-| WS handshake p50/p95, conns/s | 1/1 ms, 1597         |             |     |
-| web dev idle PSS              | 2.24 GB              |             |     |
+| Metric                        | baseline (pnpm/node)          | after (bun)                | Δ                                                        |
+| ----------------------------- | ----------------------------- | -------------------------- | -------------------------------------------------------- |
+| cold install median (3×)      | 9.2 s                         | 19.1 s (1×)                | +108% (network-bound; bun cache 1014 MB vs store 974 MB) |
+| warm install (3×)             | 1.75 s                        | 0.05 s                     | −97%                                                     |
+| node_modules                  | 816 MB                        | 1014 MB                    | +24% (hoisted linker)                                    |
+| bun.lock vs pnpm-lock.yaml    | 496,954 B                     | 370,658 B                  | −25%                                                     |
+| build --force median          | 55.0 s                        | 67.9 s                     | +23% (turbo: 15/15 green)                                |
+| build peak tree PSS           | 4.29 GB                       | not measured               | — (harness run skipped; build passes)                    |
+| check (56 tasks)              | baseline n/a                  | 1m56s                      | — (first measured run)                                   |
+| live boot → 200               | 2.41 s                        | 0.91 s                     | −62%                                                     |
+| live idle PSS (12 s)          | 252 MB                        | 207 MB                     | −18%                                                     |
+| WS handshake p50/p95, conns/s | 1/1 ms, 1597                  | 0/1 ms, 2417               | +51% conns/s (200/200 ok, Node client both sides)        |
+| web dev boot                  | 4.98 s                        | 3.52 s                     | −29%                                                     |
+| web dev idle PSS (12 s)       | 2.24 GB                       | 529 MB                     | −76%                                                     |
+| full tests, default conc.     | 77.7 s, exit 1 (blocks flake) | 66.5 s, exit 1 (same case) | −14% wall; same flake                                    |
+
+Finding (recorded, not fixed): the `@plane/blocks` select keyboard-walk
+flake timed out **solo** on the after side (baseline: passed solo). Same
+vitest 4.1.11, same Node 22.22; the file passes alone (77/77, 34 s). Under
+bun's hoisted layout the flake envelope widens — matched-condition full-suite
+runs red on BOTH sides; treat any solo-run of that package as the decision
+rule, not "package-solo = green".
+
+Probes (bun VM, 1.4.4): vite 8.2.4 runs under bun (`bun --bun vite --version`
+→ `bun-v26.3.0` banner); tsdown banner OK; oxlint 1.51.0 exit 0; vitest 4.1.11
+green on `packages/codemods` (33/33) under `bun --bun`; `bun --hot
+apps/live/src/start.ts` boots to `has started` (TS-direct verified — dev
+keeps tsdown-watch as primary). react-router-serve stays on Node: default
+entry.server uses `renderToPipeableStream` (Node-only API).
 
 Method notes: same laptop, same harness (`benchmarks/`), bun installs use
 `--cache-dir /tmp/bench/bun-cache` wiped for cold runs; quote medians; state

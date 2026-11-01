@@ -1,0 +1,11 @@
+{
+  "boot_s": 3.52,
+  "idle": {
+    "seconds": 12.1,
+    "avg_tree_pss_bytes": 528613177,
+    "p95_tree_pss_bytes": 538730496,
+    "cpu_percent": 0.3
+  },
+  "ws": null,
+  "cmd": "bun run dev"
+}
