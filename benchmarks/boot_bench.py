@@ -6,7 +6,7 @@ usage: boot_bench.py <out.json> <port> <workdir> <cmd...> [--ws ws://url]
 """
 import json, os, signal, subprocess, sys, time, urllib.error, urllib.request
 
-sys.path.insert(0, "/tmp/bench")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sample_rss import sample_tree
 
 

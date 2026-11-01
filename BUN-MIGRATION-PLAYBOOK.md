@@ -47,8 +47,10 @@ isolated at /tmp/bench/pnpm-store-cold; medians, 3 runs for installs):
 Known pre-existing flake (present in baseline, not caused by this migration):
 `@plane/blocks` test `src/select/select.test.tsx > selects a row the keyboard
 walked past the rendered window` times out when the whole suite runs under
-full-parallel turbo load; it passes when the package runs alone. Gate rule
-(§8) accounts for it. Do not "fix" that test.
+full-parallel turbo load; it passes when the package runs alone. The baseline
+recorded it at turbo's **default concurrency** — do not pin `--concurrency`
+on either side of the comparison. Gate rule (§8) accounts for it. Do not
+"fix" that test.
 
 ## 1. Verified compatibility facts (ground truth; do not re-litigate)
 
@@ -130,48 +132,49 @@ to make install pass — they are CVE pins.
 1. `"packageManager": "pnpm@11.10.0+sha512.…" → "packageManager": "bun@1.4.4"`.
 2. `"engines"`: keep `"node": ">=22.22.0"`, add `"bun": ">=1.4.4"`.
 3. Add `"trustedDependencies": ["@parcel/watcher", "@swc/core", "esbuild",
-"msgpackr-extract", "turbo", "sharp"]` (exact list; order irrelevant).
+"msgpackr-extract", "turbo"]` (exact list; order irrelevant). Note
+   `sharp` is deliberately **excluded**: pnpm's `allowBuilds` denies it
+   (`sharp: false`) and sharp ships its platform binaries as
+   optionalDependencies prebuilds, so no lifecycle script is needed — keeping
+   it out preserves the deny on both sides. Empirical anchor: the baseline
+   install ran lifecycle scripts for `@parcel/watcher` and
+   `msgpackr-extract` (pnpm applies built-in defaults on top of its
+   allow-map); Bun blocks everything not in `trustedDependencies`, so after
+   this edit `bun pm untrusted` must report **sharp only** (it did report
+   `@parcel/watcher` alone before the edit — that block is what this list
+   resolves). Any other package on either side of the run/blocked split that
+   differs from the baseline install log = STOP and report.
 4. Workspaces (single authoritative form — an array cannot carry `catalog`,
-   so the object form wins):
+   so the object form wins). Use an **explicit package list**, not `apps/*`:
    ```jsonc
    "workspaces": {
-     "packages": ["apps/*", "packages/*"],
+     "packages": ["apps/admin", "apps/live", "apps/space", "apps/web", "packages/*"],
      "catalog": { …migrated from pnpm-workspace.yaml, audited in Phase 1… }
    }
    ```
-   The pnpm `!apps/api` / `!apps/proxy` exclusions are dropped — both are
-   already workspace members with zero JS dependencies (apps/api/package.json
-   has no dependencies field; apps/proxy has none), so `apps/*` membership is
-   harmless. Verify after install: `grep -c apps/api bun.lock` → 0.
-5. If Bun's Phase-1 install already generated the `"workspaces"` object with
-   a `catalog` block, keep it (merge rule: its `packages` array must be
-   exactly `["apps/*", "packages/*"]`; its `catalog` is the Phase-1-audited
-   one).
+   This reproduces pnpm's `!apps/api` / `!apps/proxy` exclusions without
+   relying on negation support. Apply the same replacement to the `packages`
+   array of the object Bun's Phase-1 install generated (step 5).
+5. Bun's Phase-1 install already generated the `"workspaces"` object with a
+   `catalog` block — keep it, with `packages` set to the explicit list above.
+   Verify: `apps/api` (name `plane-api`) may appear in bun.lock as a
+   workspace member — it must contribute **no dependencies** (its
+   package.json declares none). `apps/proxy` must not appear at all.
 
 ### 3.2 `bunfig.toml` — new file, repo root, full content
 
 ```toml
 # Bun configuration. Replaces pnpm-workspace.yaml policy settings.
 [install]
-# Keep bun.lock as the single source of truth for dependency resolution.
+# Key verified against bun 1.4.4 (install completes; treat lockfile as frozen
+# by default so --frozen-lockfile in CI is a no-op guard, not the only guard).
 frozenLockfile = true
-
-[install.minimumReleaseAgeExcludes]
-"@storybook/addon-docs@10.4.6" = true
-"@storybook/builder-vite@10.4.6" = true
-"@storybook/csf-plugin@10.4.6" = true
-"@storybook/react-dom-shim@10.4.6" = true
-"@storybook/react-vite@10.4.6" = true
-"@storybook/react@10.4.6" = true
-"storybook@10.4.6" = true
-"@makeplane/propel@0.7.3" = true
 ```
 
-(The excludes are moved verbatim from pnpm-workspace.yaml
-`minimumReleaseAgeExclude`; the table-of-true form is how bunfig expresses a
-string list here. If `bun install` rejects the table form, switch to the
-array form documented at https://bun.com/docs/bunfig — same entries, same
-order — and record which form you used.)
+This repo sets no active pnpm `minimumReleaseAge`, so nothing else migrates
+here. (If you reintroduce a release-age policy later, Bun 1.3+ spells it
+`minimumReleaseAge` in this file; the exclude key is
+`minimumReleaseAgeExcludes`.)
 
 ### 3.3 Files to delete at the END of the migration (Phase 7 gate, not now)
 
@@ -208,22 +211,21 @@ root scripts already call plain `turbo`/`pnpm exec` patterns per the grep.
 Corepack note: `corepack enable pnpm` lines in docs/CI die in Phase 4/5.
 
 apps/live scripts (exact final bodies; both invocation forms verified on
-1.4.4 at the base commit — `bun .` resolves package `main`
-(`./dist/start.mjs`) and boots Express + Redis against a real valkey):
+1.4.4 at the base commit — `bun .` and `bun run .` both resolve package
+`main` (`./dist/start.mjs`) and boot Express + Redis against a real valkey;
+root `prepare` also runs under `bun install`, so husky hooks survive):
 
 ```jsonc
-"dev":   "bun run --hot --env-file=.env ./src/start.ts",
+"dev":   "tsdown --watch --no-clean --onSuccess \"bun run --env-file=.env .\"",
 "start": "bun run --env-file=.env .",
 ```
 
-`bun run --hot` is Bun's watch mode (replaces `tsdown --watch --no-clean
---onSuccess "node --env-file=.env ."`); the Dockerfile CMD (§6) uses the
-same `bun <dir>` form as `start` — `["bun", "apps/live"]` from /app, run
-from apps/live it is `["bun", "."]`. If `bun run --hot ./src/start.ts`
-fails on a TS/path alias the tsdown build had handled, fall back to the
-built output for dev too:
-`"dev": "tsdown --watch --no-clean --onSuccess \"bun run --env-file=.env .\""`
-— record which variant you kept.
+`dev` keeps the repo's existing watch build and swaps only the serve
+command (`node` → `bun`) — this exact form is verified. Do NOT switch `dev`
+to `bun run --hot ./src/start.ts` (running the TS source directly): that
+variant is unverified against this app's tsconfig paths, `@effect/*`
+imports, and the generated-`dist` contract; treat it as an optional
+experiment only if `dev` misbehaves, and record which variant you kept.
 
 No other app runs a JS server process in production (web/admin are static
 bundles behind Caddy; space is `react-router-serve` on Node inside Docker —
@@ -286,6 +288,24 @@ Also per workflow:
 
 New file `.bun-version` at repo root, single line: `1.4.4`.
 
+**Cutover-commit discipline:** `pnpm-lock.yaml` is referenced by the
+Dockerfiles (§6), by CI caches (`hashFiles('**/pnpm-lock.yaml')`), and by
+turbo's globalDependencies (§3.3). Do NOT delete the pnpm files in a
+standalone early commit — the branch's CI and image builds would go red
+mid-playbook and a half-migrated tree becomes indistinguishable from a real
+regression. Land §4–§7 as a reviewable series, then make **one atomic
+cutover commit** that deletes `pnpm-workspace.yaml` + `.npmrc` +
+`pnpm-lock.yaml` and carries every Dockerfile, workflow, `turbo.json`, and
+`.flox/env/manifest.toml` edit together; run the local gates in §8 steps
+1–3 BEFORE that commit, and expect the fork's Actions to run against the
+pushed result.
+
+`check-version.yml` note: it runs `node -p "require('./package.json').version"`.
+setup-bun installs no `node` binary — switch that line to
+`bun -p "require('./package.json').version"` (verified: `bun -p` exists on
+1.4.4 and prints the version), or keep a setup-node step just for this
+workflow if you prefer zero risk there.
+
 ## 6. Phase 5 — Docker
 
 Rule per file: builder/installer stages switch corepack-pnpm → bun
@@ -339,6 +359,13 @@ pnpm.version = "11.10.0"
 pnpm.pkg-group = "pnpm"
 ```
 
+Version constraint: the flox catalog carries `bun` **1.4.2** (checked via
+`flox show bun`), not the 1.4.4 used elsewhere. Pin the manifest to the
+catalog's (`bun.version = "1.4.2"`) OR add a `.bun-version` respect — the
+deviation between 1.4.2 (flox dev env) and 1.4.4 (CI/Docker) is acceptable
+within 1.4.x, but record it in the PR description; do not silently let the
+two float.
+
 `[services.web]` command: `exec pnpm dev` → `exec bun run dev`.
 
 Update the manifest `description` toolchain line: `Node 22, pnpm 11.10.0` →
@@ -353,19 +380,36 @@ Run from a clean tree: `find . -name node_modules -type d -prune -exec rm -rf
 {} +` then `bun install --frozen-lockfile`.
 
 1. **Install**: `bun install --frozen-lockfile` exits 0, twice in a row
-   (idempotence).
+   (idempotence). Then **resolver integrity** — every CVE floor and override
+   pin from the migrated `overrides` must still hold, or the perf PR ships a
+   security regression. At minimum:
+   ```bash
+   for pair in "markdown-it:14.3.3" "prosemirror-view:1.42.6" \
+     "prosemirror-model:1.25.12" "prosemirror-state:1.4.4" "path-to-regexp:0.1.13" \
+     "follow-redirects:1.16.1" "body-parser:1.20.9" "fast-uri:3.1.8"; do
+     n="${pair%%:*}"; v="${pair##*:}"
+     grep -q "\"$n\": \"$v\"" bun.lock || { echo "OVERRIDE DRIFT: $pair"; exit 1; }
+   done
+   ```
+   Also verify exactly one React version in bun.lock and that the
+   range-form floors (`browserslist >=4.28.7`, `toml >=5.0.1 <6`,
+   `tinypool@2 >=2.1.2`, `proxy-addr >=2.0.8`) resolve inside their ranges
+   (`bun pm ls | grep <name>` for each). Any drift = STOP; the install-time
+   benchmark is only a same-graph comparison when this passes.
 2. **Type/lint**: `bun run check` exits 0 (turbo → check:format/check:lint/
    check:types under oxlint/oxfmt/tsc on Node).
 3. **Build**: `bun run build` exits 0; all 4 apps emit dist/build.
-4. **Tests**: the root has no `test` script — drive turbo directly with
-   concurrency pinned so contention matches the baseline that recorded the
-   blocks flake:
-   `bunx turbo run test --force --concurrency=4`
+4. **Tests**: the root has no `test` script — drive turbo directly, at
+   default concurrency on both sides (the baseline flake was recorded at
+   default; pinning would lighten the after-pass and fake a fix):
+   `bunx turbo run test --force`
    — every suite green EXCEPT the documented pre-existing blocks flake (§0).
    Decision rule: rerun only the failed package alone
-   (`bunx turbo run test --filter=@plane/blocks --force --concurrency=4`).
+   (`bunx turbo run test --filter=@plane/blocks --force`).
    Passes alone → record as known flake, proceed. Fails alone → real
-   regression: STOP, report.
+   regression: STOP, report. You may not raise `testTimeout`, skip, or
+   delete that case; if it times out again under matched conditions, report
+   it as a finding.
 5. **live runtime gate**:
    ```bash
    docker run -d --rm --name gate-valkey -p 6379:6379 valkey/valkey:7.2.11-alpine
@@ -405,5 +449,18 @@ stop and hand back the branch with the failure log.
 
 Method notes: same laptop, same harness (`benchmarks/`), bun installs use
 `--cache-dir /tmp/bench/bun-cache` wiped for cold runs; quote medians; state
-that cold install is network-bound and node_modules size reflects Bun's
-hoisted default linker vs pnpm's isolated linker.
+that cold install is network-bound (the baseline logged 27–39 KiB/s registry
+warnings) and node_modules size reflects Bun's hoisted default linker vs
+pnpm's isolated linker. Fill the after column **only** from harness runs —
+there are no projections in this document.
+
+Variant labels for the after column: the JS build/test tools (vite, tsdown,
+oxlint, vitest) execute on **Node via their shebangs** under `bun run`
+regardless of package manager — so label build/test/dev-server rows
+`pm-only` (that is what `bun run dev` measures). If you additionally measure
+`bun run --bun dev` (forces the Bun VM), label it `pm-plus-runtime` as a
+separate row; probe the flag on 1.4.4 first
+(`cd apps/web && bun --bun vite --version`) and STOP if it errors rather
+than reporting a broken number. WS rows: the client stays **Node on both
+sides** (`node benchmarks/ws-bench.mjs`, as in §8) — only the server engine
+changes, or the handshake number attributes client speed to the migration.
