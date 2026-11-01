@@ -46,10 +46,13 @@ isolated at /tmp/bench/pnpm-store-cold; medians, 3 runs for installs):
 
 Known pre-existing flake (present in baseline, not caused by this migration):
 `@plane/blocks` test `src/select/select.test.tsx > selects a row the keyboard
-walked past the rendered window` times out when the whole suite runs under
-full-parallel turbo load; it passes when the package runs alone. The baseline
-recorded it at turbo's **default concurrency** — do not pin `--concurrency`
-on either side of the comparison. Gate rule (§8) accounts for it. Do not
+walked past the rendered window` times out under full-suite turbo load.
+Measured states (baseline → after): full suite FAIL on both sides; whole
+package solo PASSED at baseline (44 s) but FAILED on the after side; the
+single file alone passes on both (77/77, 34 s). The baseline recorded it at
+turbo's **default concurrency** — do not pin `--concurrency` on either side.
+Decision rule (§8): the file must pass alone; a package-solo failure is a
+recorded finding under bun's hoisted layout, not an automatic STOP. Do not
 "fix" that test.
 
 ## 1. Verified compatibility facts (ground truth; do not re-litigate)
@@ -144,11 +147,15 @@ to make install pass — they are CVE pins.
    `msgpackr-extract` (pnpm applies built-in defaults on top of its
    allow-map); Bun blocks everything not in `trustedDependencies`, so after
    this edit `bun pm untrusted` must report **nothing** and the install must
-   print `Blocked 0 postinstall` (before the edit it reported exactly
-   `@parcel/watcher` — that block is what this list resolves; sharp was
-   never in the run/blocked split because it has no script to run). Any
-   other package on either side of the run/blocked split that differs from
-   the baseline install log = STOP and report.
+   print `Blocked 0 postinstall`. Note the watcher block was **cosmetic** on
+   linux-x64: the platform prebuild
+   (`@parcel/watcher-linux-x64-glibc@2.5.4`) ships the `.node` binding as an
+   optionalDependency — the blocked `build-from-source.js` is only a
+   fallback, so the list fixes tooling behavior (which packages are allowed
+   to build), not a functional gap. sharp was never in the run/blocked
+   split (no script to run). Any other package on either side of the
+   run/blocked split that differs from the baseline install log = STOP and
+   report.
 4. Workspaces (single authoritative form — an array cannot carry `catalog`,
    so the object form wins). Use an **explicit package list**, not `apps/*`:
    ```jsonc
@@ -470,21 +477,20 @@ stop and hand back the branch with the failure log.
 
 ## 9. Results table (fill after Phase 7)
 
-| Metric                        | baseline (pnpm/node)          | after (bun)                | Δ                                                        |
-| ----------------------------- | ----------------------------- | -------------------------- | -------------------------------------------------------- |
-| cold install median (3×)      | 9.2 s                         | 19.1 s (1×)                | +108% (network-bound; bun cache 1014 MB vs store 974 MB) |
-| warm install (3×)             | 1.75 s                        | 0.05 s                     | −97%                                                     |
-| node_modules                  | 816 MB                        | 1014 MB                    | +24% (hoisted linker)                                    |
-| bun.lock vs pnpm-lock.yaml    | 496,954 B                     | 370,658 B                  | −25%                                                     |
-| build --force median          | 55.0 s                        | 67.9 s                     | +23% (turbo: 15/15 green)                                |
-| build peak tree PSS           | 4.29 GB                       | not measured               | — (harness run skipped; build passes)                    |
-| check (56 tasks)              | baseline n/a                  | 1m56s                      | — (first measured run)                                   |
-| live boot → 200               | 2.41 s                        | 0.91 s                     | −62%                                                     |
-| live idle PSS (12 s)          | 252 MB                        | 207 MB                     | −18%                                                     |
-| WS handshake p50/p95, conns/s | 1/1 ms, 1597                  | 0/1 ms, 2417               | +51% conns/s (200/200 ok, Node client both sides)        |
-| web dev boot                  | 4.98 s                        | 3.52 s                     | −29%                                                     |
-| web dev idle PSS (12 s)       | 2.24 GB                       | 529 MB                     | −76%                                                     |
-| full tests, default conc.     | 77.7 s, exit 1 (blocks flake) | 66.5 s, exit 1 (same case) | −14% wall; same flake                                    |
+| Metric                                          | baseline (pnpm/node)                      | after (bun)                                              | Δ                                                             |
+| ----------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
+| cold install (1×, network-bound both sides)     | 9.2 s                                     | 19.1 s                                                   | +108% (bun cache 847 MB vs pnpm store 831 MB, `du -sb` both)  |
+| warm install (3×)                               | 1.75 s                                    | 0.05 s                                                   | −97%                                                          |
+| node_modules (`du -sb`)                         | 816 MB                                    | 847 MB                                                   | +4% (hoisted linker; no disk win)                             |
+| bun.lock vs pnpm-lock.yaml                      | 496,954 B                                 | 370,658 B                                                | −25%                                                          |
+| build --force (2× vs 1×)                        | 49.2–55.0 s                               | 67.9 s                                                   | +23–38% (turbo: 15/15 green; peak PSS not measured)           |
+| live boot → 200 (host runtime)                  | 2.41 s                                    | 0.91 s                                                   | −62%                                                          |
+| live idle PSS (12 s mean, `sample_rss.py` tree) | 252 MB                                    | 207 MB                                                   | −18%                                                          |
+| WS handshake p50/p95, conns/s                   | 1/1 ms, 1597                              | 0/1 ms, 2417                                             | single run each; +51% direction only (Node client both sides) |
+| WS in-container (image)                         | —                                         | 200/200, 2333 conns/s                                    | runner claim proven in-image                                  |
+| web dev boot (harness)                          | 4.98 s                                    | 3.52 s                                                   | −29%                                                          |
+| web dev idle PSS (12 s tree)                    | 2.24 GB                                   | 529 MB                                                   | −76%                                                          |
+| full tests, default conc.                       | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5 s, exit 1 (package-solo FAIL; file-solo 77/77 34 s) | −14% wall; flake envelope widened, see finding                |
 
 Finding (recorded, not fixed): the `@plane/blocks` select keyboard-walk
 flake timed out **solo** on the after side (baseline: passed solo). Same
@@ -495,10 +501,12 @@ rule, not "package-solo = green".
 
 Probes (bun VM, 1.4.4): vite 8.2.4 runs under bun (`bun --bun vite --version`
 → `bun-v26.3.0` banner); tsdown banner OK; oxlint 1.51.0 exit 0; vitest 4.1.11
-green on `packages/codemods` (33/33) under `bun --bun`; `bun --hot
-apps/live/src/start.ts` boots to `has started` (TS-direct verified — dev
-keeps tsdown-watch as primary). react-router-serve stays on Node: default
-entry.server uses `renderToPipeableStream` (Node-only API).
+green under `bun --bun` on a **non-DOM** package (`packages/codemods`, 33/33);
+`bun --hot apps/live/src/start.ts` boots to `has started` (TS-direct verified —
+dev keeps tsdown-watch as primary). DOM test suites (jsdom/fake-timers, e.g.
+`@plane/blocks`) are UNPROVEN under the Bun VM — do not flip the test runner.
+react-router-serve stays on Node: default entry.server uses
+`renderToPipeableStream` (Node-only API).
 
 Method notes: same laptop, same harness (`benchmarks/`), bun installs use
 `--cache-dir /tmp/bench/bun-cache` wiped for cold runs; quote medians; state
