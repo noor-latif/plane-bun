@@ -131,17 +131,22 @@ to make install pass — they are CVE pins.
 2. `"engines"`: keep `"node": ">=22.22.0"`, add `"bun": ">=1.4.4"`.
 3. Add `"trustedDependencies": ["@parcel/watcher", "@swc/core", "esbuild",
 "msgpackr-extract", "turbo", "sharp"]` (exact list; order irrelevant).
-4. Workspaces: root becomes
-   `"workspaces": ["apps/*", "packages/*"]`. The pnpm `!apps/api` /
-   `!apps/proxy` exclusions are dropped — both are already workspace members
-   with zero JS dependencies (apps/api/package.json has no dependencies
-   field; apps/proxy has none), so `apps/*` membership is harmless. Verify
-   after install: `grep -c apps/api bun.lock` → 0.
-5. After the first `bun install` of Phase 1 succeeded, root package.json must
-   also contain the migrated `"workspaces": { "packages": …, "catalog": {…} }`
-   object Bun generated. Merge: keep Bun's object form and ensure its
-   `packages` array is exactly `["apps/*", "packages/*"]` and its `catalog`
-   matches pnpm's catalog audit from Phase 1.
+4. Workspaces (single authoritative form — an array cannot carry `catalog`,
+   so the object form wins):
+   ```jsonc
+   "workspaces": {
+     "packages": ["apps/*", "packages/*"],
+     "catalog": { …migrated from pnpm-workspace.yaml, audited in Phase 1… }
+   }
+   ```
+   The pnpm `!apps/api` / `!apps/proxy` exclusions are dropped — both are
+   already workspace members with zero JS dependencies (apps/api/package.json
+   has no dependencies field; apps/proxy has none), so `apps/*` membership is
+   harmless. Verify after install: `grep -c apps/api bun.lock` → 0.
+5. If Bun's Phase-1 install already generated the `"workspaces"` object with
+   a `catalog` block, keep it (merge rule: its `packages` array must be
+   exactly `["apps/*", "packages/*"]`; its `catalog` is the Phase-1-audited
+   one).
 
 ### 3.2 `bunfig.toml` — new file, repo root, full content
 
@@ -177,6 +182,9 @@ order — and record which form you used.)
 - `.npmrc` — pnpm-only settings (`node-linker=isolated`,
   `public-hoist-pattern`, …). Bun ignores it; delete it (§1.10: default
   linker is the hoisted layout — this is the expected disk win).
+  In the same edit remove `".npmrc"` from `turbo.json`'s
+  `globalDependencies` array (it would fail turbo's hash inputs on a
+  deleted file). Keep the other entries (`.oxfmtrc.json`, `.oxlintrc.json`).
 
 Do not delete either file before Phase 7's gate passes.
 
@@ -199,17 +207,21 @@ Known sites: `packages/i18n/package.json` has
 root scripts already call plain `turbo`/`pnpm exec` patterns per the grep.
 Corepack note: `corepack enable pnpm` lines in docs/CI die in Phase 4/5.
 
-apps/live scripts (exact final bodies):
+apps/live scripts (exact final bodies; both invocation forms verified on
+1.4.4 at the base commit — `bun .` resolves package `main`
+(`./dist/start.mjs`) and boots Express + Redis against a real valkey):
 
 ```jsonc
-"dev":   "bun run --hot --env-file=.env ./src/index.ts",
+"dev":   "bun run --hot --env-file=.env ./src/start.ts",
 "start": "bun run --env-file=.env .",
 ```
 
-`bun run --hot` is Bun's watch mode (replaces `tsdown --watch --onSuccess
-"node --env-file=.env ."`); `bun run .` resolves the package `main`
-(`./dist/start.mjs`). If `bun run --hot ./src/index.ts` fails on a TS/path
-alias the tsdown build had handled, fall back to the built output for dev too:
+`bun run --hot` is Bun's watch mode (replaces `tsdown --watch --no-clean
+--onSuccess "node --env-file=.env ."`); the Dockerfile CMD (§6) uses the
+same `bun <dir>` form as `start` — `["bun", "apps/live"]` from /app, run
+from apps/live it is `["bun", "."]`. If `bun run --hot ./src/start.ts`
+fails on a TS/path alias the tsdown build had handled, fall back to the
+built output for dev too:
 `"dev": "tsdown --watch --no-clean --onSuccess \"bun run --env-file=.env .\""`
 — record which variant you kept.
 
@@ -345,9 +357,13 @@ Run from a clean tree: `find . -name node_modules -type d -prune -exec rm -rf
 2. **Type/lint**: `bun run check` exits 0 (turbo → check:format/check:lint/
    check:types under oxlint/oxfmt/tsc on Node).
 3. **Build**: `bun run build` exits 0; all 4 apps emit dist/build.
-4. **Tests**: `bun run test` — every suite green EXCEPT the documented
-   pre-existing blocks flake (§0). Decision rule: rerun only the failed
-   package alone (`bun run turbo run test --filter=@plane/blocks --force`).
+4. **Tests**: the root has no `test` script — drive turbo directly with
+   concurrency pinned so contention matches the baseline that recorded the
+   blocks flake:
+   `bunx turbo run test --force --concurrency=4`
+   — every suite green EXCEPT the documented pre-existing blocks flake (§0).
+   Decision rule: rerun only the failed package alone
+   (`bunx turbo run test --filter=@plane/blocks --force --concurrency=4`).
    Passes alone → record as known flake, proceed. Fails alone → real
    regression: STOP, report.
 5. **live runtime gate**:
@@ -355,8 +371,9 @@ Run from a clean tree: `find . -name node_modules -type d -prune -exec rm -rf
    docker run -d --rm --name gate-valkey -p 6379:6379 valkey/valkey:7.2.11-alpine
    cd apps/live && bun run start   # with .env from .env.example
    ```
-   Then, from a second shell:
-   `node benchmarks/ws-bench.mjs ws://127.0.0.1:3100/live 200`
+   Then, from a second shell — run it **from `apps/live`** (ws-bench resolves
+   the `ws` package from `process.cwd()`):
+   `cd apps/live && node ../../benchmarks/ws-bench.mjs ws://127.0.0.1:3100/live 200`
    must report `ok: 200, fail: 0`. Any handshake failure = Bun runtime
    regression in the ws path = STOP.
 6. **flox**: `flox activate -d . -c 'bun --version && node --version'`
