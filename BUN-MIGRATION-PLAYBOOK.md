@@ -99,7 +99,15 @@ bun install
 ```
 
 This writes `bun.lock` and rewrites catalog definitions into root
-package.json `workspaces.catalog`. Then verify, in order:
+package.json `workspaces.catalog`. **Verified at the base commit** (executor:
+your numbers should match within network jitter): 1174 packages, `bun.lock`
+created, catalog migrated **179/179 entries with zero version drift**, the
+markdown-it override resolves to the pinned 14.3.3, and install prints
+`Blocked 1 postinstall` naming `@parcel/watcher@2.5.4`
+(`node scripts/build-from-source.js`). That block is EXPECTED here — it is
+what §3.1 step 3 (`trustedDependencies`) resolves; confirm with
+`bun pm untrusted` (must list exactly that one package). Any OTHER blocked or
+failing package = STOP and report.
 
 ```bash
 test -f bun.lock && echo lockfile-ok
