@@ -365,13 +365,13 @@ node:22-alpine stages add
   it; the tag exists, musl, carries 1.4.4). This keeps Node available for the
   vite/tsdown/tsc shebangs. Use `bunx turbo@<pinned> prune/build` — no global
   installs (bun's global bin dir is not on PATH in these stages). The
-installer COPY keeps the lockfile line, renamed:
-`COPY --from=builder /app/out/bun.lock ./bun.lock` (turbo ≥2.5 emits
-bun.lock there). **Copy `bunfig.toml` into every pruned installer next to
-`turbo.json`** (`COPY bunfig.toml bunfig.toml`) — the pruned context only
-contains files the Dockerfile copies, and without bunfig the in-image
-`bun install` silently reverts to the hoisted layout while host/CI installs
-use isolated (verified both ways). Replace the `pnpm fetch` + `pnpm install --offline
+  installer COPY keeps the lockfile line, renamed:
+  `COPY --from=builder /app/out/bun.lock ./bun.lock` (turbo ≥2.5 emits
+  bun.lock there). **Copy `bunfig.toml` into every pruned installer next to
+  `turbo.json`** (`COPY bunfig.toml bunfig.toml`) — the pruned context only
+  contains files the Dockerfile copies, and without bunfig the in-image
+  `bun install` silently reverts to the hoisted layout while host/CI installs
+  use isolated (verified both ways). Replace the `pnpm fetch` + `pnpm install --offline
 --frozen-lockfile` cache-mount pairs with a single
   `RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache bun install --frozen-lockfile`
   (space/admin: prefix `NODE_ENV=development` to keep dev deps).
@@ -495,27 +495,33 @@ stop and hand back the branch with the failure log.
 
 ## 9. Results table (fill after Phase 7)
 
-| Metric                        | baseline (pnpm/node) | after (bun) | Δ   |
-| ----------------------------- | -------------------- | ----------- | --- |
-| cold install (1×, network-bound both sides) | 9.2 s | 19.1 s | +108% (bun cache 847 MB vs pnpm store 831 MB, `du -sb` both) |
-| warm install (3×)             | 1.75 s               | 0.05 s      | −97% |
-| node_modules (`du -sb`)       | 816 MB               | 847 MB      | +4% (isolated linker; layout parity restored) |
-| bun.lock vs pnpm-lock.yaml    | 496,954 B            | 370,658 B   | −25% |
-| build --force (isolated linker) | 49.2–55.0 s        | 39.0 s      | **−20–29%** (hoisted layout measured 67.9 s — layout, not bun) |
-| build peak tree PSS           | 4.29 GB              | not measured | — |
-| live boot → 200               | 2.41 s               | 0.92 s      | −62% (identical on both layouts) |
-| live idle PSS (12 s tree)     | 252 MB               | 207 MB      | −18% |
-| WS handshake p50/p95, conns/s | 1/1 ms, 1597         | 0/1 ms, 2153 host / 2186 in-image | single run each; ~+35% direction only (Node client both sides) |
-| web dev boot                  | 4.98 s               | 5.39 s      | ~parity (hoisted read 3.52 s; layout-sensitive) |
-| web dev idle PSS (12 s tree)  | 2.24 GB              | 1.86 GB     | −17% (single run; hoisted read 529 MB — high run variance) |
-| full tests, default conc.     | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5/77.8 s, exit 1 — **on both bun layouts** (package-solo FAIL; file-solo 77/77 in ~33 s) | −14% wall; package-solo flip is bun-wide, see finding |
+| Metric                                      | baseline (pnpm/node)                      | after (bun)                                                                                 | Δ                                                                                              |
+| ------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| cold install (1×, network-bound both sides) | 9.2 s                                     | 19.1 s                                                                                      | +108% (bun cache 847 MB vs pnpm store 831 MB, `du -sb` both)                                   |
+| warm install (3×)                           | 1.75 s                                    | 0.05 s                                                                                      | −97%                                                                                           |
+| node_modules (`du -sb`)                     | 816 MB                                    | 847 MB                                                                                      | +4% (isolated linker; layout parity restored)                                                  |
+| bun.lock vs pnpm-lock.yaml                  | 496,954 B                                 | 370,658 B                                                                                   | −25%                                                                                           |
+| build --force (isolated linker)             | 49.2–55.0 s                               | 39.0 s                                                                                      | **−20–29%** (hoisted layout measured 67.9 s — layout, not bun)                                 |
+| build peak tree PSS                         | 4.29 GB                                   | not measured                                                                                | —                                                                                              |
+| live boot → 200                             | 2.41 s                                    | 0.92 s                                                                                      | −62% (identical on both layouts)                                                               |
+| live idle PSS (12 s tree)                   | 252 MB                                    | 207 MB                                                                                      | −18%                                                                                           |
+| WS handshake p50/p95, conns/s               | 1/1 ms, 1597                              | 0/1 ms, 2153 host / 2186 in-image                                                           | single run each; ~+35% direction only (Node client both sides)                                 |
+| web dev boot                                | 4.98 s                                    | 5.39 s                                                                                      | ~parity (hoisted read 3.52 s; layout-sensitive)                                                |
+| web dev idle PSS (12 s tree)                | 2.24 GB                                   | 1.86 GB                                                                                     | −17% (single run; hoisted read 529 MB — high run variance)                                     |
+| full tests, default conc.                   | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5/77.8 s, exit 1 — **on both bun linkers** (package-solo FAIL; file-solo 77/77 in ~33 s) | −14% wall; package-solo flip is bun-install-context-specific (cause undetermined), see finding |
 
 Finding (recorded, not fixed): the `@plane/blocks` select keyboard-walk
 flake times out **package-solo** under bun (baseline: passed package-solo).
 Same vitest 4.1.11, same Node 22.22; the file passes alone on every side
 (77/77, ~33 s). Verified layout-independent: package-solo fails under bun
-hoisted AND isolated (pnpm-parity), so the flip is a bun-runtime difference,
-not a link-layout artifact. Suspected residue (unverified): pnpm's
+hoisted AND isolated (pnpm-parity), so the flip is specific to the bun
+install context (`.bun` store, resolution paths, install artifacts) —
+cause undetermined, flake-timing class (fake timers + `shouldAdvanceTime`, rAF-gated focus);
+full-suite runs fail this case on both sides regardless. Note vitest itself
+executes on Node in both stacks — bun is only the installer/script-runner
+here. Carry it in the PR body as a live open risk, not a footnote; do not
+call it a layout regression, do not "fix" the test. Suspected residue
+(unverified): pnpm's
 `public-hoist-pattern` (typescript, eslint, `*@plane/*`, vite) has no bun
 equivalent. Full-suite runs are red on BOTH sides; the file-solo pass is the
 decision rule (§8), not "package-solo = green".
