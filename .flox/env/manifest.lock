@@ -1,0 +1,790 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "schema-version": "1.19.0",
+    "description": "  Plane, self-hosted locally from the Flox Catalog.\n\n  Toolchain: Node 22, pnpm 11.10.0, Python 3.12, uv.\n  Services: PostgreSQL 15, Valkey, RabbitMQ, MinIO, the Django API and the\n  four React Router apps.\n\n  Get everything up:\n\n      flox activate\n      flox services start\n\n  Register the instance admin at http://localhost:3001/god-mode/ and then log\n  in at http://localhost:3000. Service data lives in .flox/data.\n",
+    "install": {
+      "minio": {
+        "pkg-path": "minio"
+      },
+      "nodejs": {
+        "pkg-path": "nodejs_22"
+      },
+      "pnpm": {
+        "pkg-path": "pnpm",
+        "pkg-group": "pnpm",
+        "version": "11.10.0"
+      },
+      "postgresql": {
+        "pkg-path": "postgresql_15"
+      },
+      "python312": {
+        "pkg-path": "python312"
+      },
+      "rabbitmq-server": {
+        "pkg-path": "rabbitmq-server"
+      },
+      "valkey": {
+        "pkg-path": "valkey"
+      }
+    },
+    "hook": {
+      "on-activate": "  set -u\n  root=\"${FLOX_ENV_PROJECT:?}\"\n  export PLANE_DATA=\"$root/.flox/data\"\n\n  mkdir -p \"$PLANE_DATA\"/pg \"$PLANE_DATA\"/valkey \"$PLANE_DATA\"/rabbitmq \\\n           \"$PLANE_DATA\"/rabbitmq/mnesia \"$PLANE_DATA\"/rabbitmq/log \\\n           \"$PLANE_DATA\"/rabbitmq/home \"$PLANE_DATA\"/minio \"$PLANE_DATA\"/logs \\\n           \"$PLANE_DATA\"/uv/bin\n\n  # uv is provisioned by bootstrap at the version apps/api/pyproject.toml\n  # requires: the catalog carries no matching build. Putting the directory on\n  # PATH now means later services pick the binary up once bootstrap installs it.\n  export PATH=\"$PLANE_DATA/uv/bin:$PATH\"\n  export RABBITMQ_MNESIA_BASE=\"$PLANE_DATA/rabbitmq/mnesia\"\n  export RABBITMQ_LOG_BASE=\"$PLANE_DATA/rabbitmq/log\"\n  # Loopback-only listener; RABBITMQ_NODE_IP_ADDRESS is unreliable in 4.x.\n  printf 'listeners.tcp.default = 127.0.0.1:5672\\n' > \"$PLANE_DATA/rabbitmq/rabbitmq.conf\"\n  export RABBITMQ_CONFIG_FILE=\"$PLANE_DATA/rabbitmq/rabbitmq.conf\"\n\n  # Front-end env files are plain copies; the examples already point at\n  # localhost:8000 / 3000 / 3001 / 3002 / 3100.\n  for app in web admin space live; do\n    if [ ! -f \"$root/apps/$app/.env\" ] && [ -f \"$root/apps/$app/.env.example\" ]; then\n      cp \"$root/apps/$app/.env.example\" \"$root/apps/$app/.env\"\n    fi\n  done\n\n  # The API env is the one that needs values: catalog services run on host\n  # ports, and PostgreSQL gets 5433 so the environment never collides with a\n  # PostgreSQL already running on the machine.\n  if [ ! -f \"$root/apps/api/.env\" ] && [ -f \"$root/apps/api/.env.example\" ]; then\n    secret=\"$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 50)\"\n    sed -e 's/^POSTGRES_HOST=.*/POSTGRES_HOST=\"127.0.0.1\"/' \\\n        -e 's/^POSTGRES_PORT=.*/POSTGRES_PORT=5433/' \\\n        -e 's/^REDIS_HOST=.*/REDIS_HOST=\"127.0.0.1\"/' \\\n        -e 's/^RABBITMQ_HOST=.*/RABBITMQ_HOST=\"127.0.0.1\"/' \\\n        -e 's|^DATABASE_URL=.*|DATABASE_URL=postgresql://plane:plane@127.0.0.1:5433/plane|' \\\n        -e 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379/|' \\\n        \"$root/apps/api/.env.example\" > \"$root/apps/api/.env\"\n    printf 'SECRET_KEY=\"%s\"\\n' \"$secret\" >> \"$root/apps/api/.env\"\n  fi\n"
+    },
+    "options": {},
+    "services": {
+      "api": {
+        "command": "  set -a; . \"$FLOX_ENV_PROJECT/apps/api/.env\"; set +a\n  for _ in $(seq 60); do\n    curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && break\n    sleep 1\n  done\n  cd \"$FLOX_ENV_PROJECT/apps/api\"\n  exec uv run bash bin/docker-entrypoint-api-local.sh\n",
+        "depends-on": {
+          "bootstrap": {
+            "condition": "process_completed_successfully"
+          },
+          "minio": {
+            "condition": "process_started"
+          }
+        }
+      },
+      "bootstrap": {
+        "command": "  set -euo pipefail\n  root=\"$FLOX_ENV_PROJECT\"\n\n  # The catalog has no uv build matching apps/api/pyproject.toml's\n  # required-version, so fetch that exact release once.\n  want=\"$(sed -n 's/^required-version *= *\"==\\(.*\\)\"/\\1/p' \"$root/apps/api/pyproject.toml\")\"\n  have=\"$(uv --version 2>/dev/null | awk '{print $2}' || true)\"\n  if [ -n \"$want\" ] && [ \"$have\" != \"$want\" ]; then\n    curl -LsSf \"https://astral.sh/uv/$want/install.sh\" \\\n      | env UV_INSTALL_DIR=\"$PLANE_DATA/uv/bin\" INSTALLER_NO_MODIFY_PATH=1 sh\n  fi\n\n  pnpm install --frozen-lockfile\n\n  for _ in $(seq 60); do\n    pg_isready -h 127.0.0.1 -p 5433 -U plane >/dev/null 2>&1 && break\n    sleep 1\n  done\n  createdb -h 127.0.0.1 -p 5433 -U plane plane 2>/dev/null || true\n\n  # The API connects as plane/plane on vhost plane. rabbitmqctl needs the same\n  # HOME (Erlang cookie) as the service; readiness is polled, not assumed.\n  (\n    export HOME=\"$PLANE_DATA/rabbitmq/home\"\n    for _ in $(seq 60); do\n      rabbitmqctl -q status >/dev/null 2>&1 && break\n      sleep 1\n    done\n    if rabbitmqctl -q list_users | cut -f1 | grep -qx plane; then\n      rabbitmqctl -q change_password plane plane\n    else\n      rabbitmqctl -q add_user plane plane\n    fi\n    rabbitmqctl -q add_vhost plane || true\n    rabbitmqctl -q set_permissions -p plane plane \".*\" \".*\" \".*\"\n  )\n\n  uv sync --project \"$root/apps/api\"\n\n  set -a; . \"$root/apps/api/.env\"; set +a\n  cd \"$root/apps/api\"\n  uv run python manage.py migrate --settings=plane.settings.local\n",
+        "shutdown": {
+          "timeout-seconds": 10
+        },
+        "depends-on": {
+          "postgres": {
+            "condition": "process_started"
+          },
+          "rabbitmq": {
+            "condition": "process_started"
+          }
+        }
+      },
+      "minio": {
+        "command": "exec minio server \"$PLANE_DATA/minio\" --address 127.0.0.1:9000 --console-address 127.0.0.1:9090",
+        "vars": {
+          "MINIO_ROOT_PASSWORD": "secret-key",
+          "MINIO_ROOT_USER": "access-key"
+        }
+      },
+      "postgres": {
+        "command": "  set -euo pipefail\n  PGDATA=\"$PLANE_DATA/pg\"\n  if [ ! -f \"$PGDATA/PG_VERSION\" ]; then\n    initdb -D \"$PGDATA\" -U plane --auth=trust >/dev/null\n  fi\n  exec postgres -D \"$PGDATA\" -p 5433 -k \"$PGDATA\"\n",
+        "shutdown": {
+          "timeout-seconds": 30
+        }
+      },
+      "rabbitmq": {
+        "command": "  export HOME=\"$PLANE_DATA/rabbitmq/home\"\n  exec rabbitmq-server\n",
+        "shutdown": {
+          "timeout-seconds": 30
+        }
+      },
+      "valkey": {
+        "command": "exec valkey-server --bind 127.0.0.1 --port 6379 --dir \"$PLANE_DATA/valkey\" --appendonly no"
+      },
+      "web": {
+        "command": "exec pnpm dev",
+        "depends-on": {
+          "bootstrap": {
+            "condition": "process_completed_successfully"
+          }
+        }
+      }
+    }
+  },
+  "packages": [
+    {
+      "attr_path": "pnpm",
+      "broken": false,
+      "derivation": "/nix/store/sh9i70w1g7xdyi5827kqv90gphzzpkfy-pnpm-11.10.0.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "name": "pnpm-11.10.0",
+      "pname": "pnpm",
+      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "rev_count": 1032869,
+      "rev_date": "2026-07-11T13:29:52Z",
+      "scrape_date": "2026-07-15T17:22:11.373249Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "11.10.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/gcf9bdk1fpdkzicq8qa53x3kxgfgd78s-pnpm-11.10.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "pnpm",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm",
+      "broken": false,
+      "derivation": "/nix/store/0p6vcrzbff7xbw6q1ib4fc7lx3syak2a-pnpm-11.10.0.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "name": "pnpm-11.10.0",
+      "pname": "pnpm",
+      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "rev_count": 1032869,
+      "rev_date": "2026-07-11T13:29:52Z",
+      "scrape_date": "2026-07-15T18:22:53.246136Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "11.10.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/sv9kq9vr0iybrqrimy5m6kyi2ybnrdv1-pnpm-11.10.0"
+      },
+      "system": "aarch64-linux",
+      "group": "pnpm",
+      "priority": 5
+    },
+    {
+      "attr_path": "pnpm",
+      "broken": false,
+      "derivation": "/nix/store/6jwxzs28ffji9w3cljd5fpgqk4rjh5s8-pnpm-11.10.0.drv",
+      "description": "Fast, disk space efficient package manager for JavaScript",
+      "install_id": "pnpm",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "name": "pnpm-11.10.0",
+      "pname": "pnpm",
+      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+      "rev_count": 1032869,
+      "rev_date": "2026-07-11T13:29:52Z",
+      "scrape_date": "2026-07-15T19:30:06.786739Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "11.10.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/kbd2pvl8kq3jpq954bicmr4rrvib77wg-pnpm-11.10.0"
+      },
+      "system": "x86_64-linux",
+      "group": "pnpm",
+      "priority": 5
+    },
+    {
+      "attr_path": "minio",
+      "broken": false,
+      "derivation": "/nix/store/g2wdnakvy2a8q2p08inffq4lkcgrlzl3-minio-2025-10-15T17-29-55Z.drv",
+      "description": "S3-compatible object storage server",
+      "install_id": "minio",
+      "license": "AGPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "minio-2025-10-15T17-29-55Z",
+      "pname": "minio",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:03:42.108930Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2025-10-15T17-29-55Z",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/6qzlsq2fd133vmgx7q49pfnhysfi7idz-minio-2025-10-15T17-29-55Z"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "minio",
+      "broken": false,
+      "derivation": "/nix/store/5pinjqz44gmrklnm2f3lz51p6dkn97q2-minio-2025-10-15T17-29-55Z.drv",
+      "description": "S3-compatible object storage server",
+      "install_id": "minio",
+      "license": "AGPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "minio-2025-10-15T17-29-55Z",
+      "pname": "minio",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:37:11.731293Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2025-10-15T17-29-55Z",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/nvli93jqjarr8aj8sj61syqb40p56bs7-minio-2025-10-15T17-29-55Z"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "minio",
+      "broken": false,
+      "derivation": "/nix/store/lxsqikdfjfy5ifhi5ixm24zlhznz4q6z-minio-2025-10-15T17-29-55Z.drv",
+      "description": "S3-compatible object storage server",
+      "install_id": "minio",
+      "license": "AGPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "minio-2025-10-15T17-29-55Z",
+      "pname": "minio",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:45:18.102815Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2025-10-15T17-29-55Z",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/hl2bj7jzn9m0yv2fgn36kjv7avr7dcqp-minio-2025-10-15T17-29-55Z"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_22",
+      "broken": false,
+      "derivation": "/nix/store/y2rmfihprjinnws46bdgi0rldfk68vaf-nodejs-22.22.2.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "nodejs-22.22.2",
+      "pname": "nodejs_22",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:03:43.889158Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "22.22.2",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/jp1j44w4fvrxvx62fasairgwv80iw6x3-nodejs-22.22.2"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_22",
+      "broken": false,
+      "derivation": "/nix/store/g1fi82jnv961qra948javmlkc6wpk6nl-nodejs-22.22.2.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "nodejs-22.22.2",
+      "pname": "nodejs_22",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:37:14.582604Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "22.22.2",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/8h77mdsa9py3x9xxx2yak50fl6kqf2ma-nodejs-22.22.2"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "nodejs_22",
+      "broken": false,
+      "derivation": "/nix/store/clrw781b5r68f6q13vsxgcmm8kgbyvg7-nodejs-22.22.2.drv",
+      "description": "Event-driven I/O framework for the V8 JavaScript engine",
+      "install_id": "nodejs",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "nodejs-22.22.2",
+      "pname": "nodejs_22",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:45:21.164654Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "22.22.2",
+      "outputs_to_install": [
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/h2barca1k5pmvcyl9fwrzwrb4cn1b248-nodejs-22.22.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "postgresql_15",
+      "broken": false,
+      "derivation": "/nix/store/36wf8z9m6hiqrvaw8w97iah65wp7j93s-postgresql-15.17.drv",
+      "description": "Powerful, open source object-relational database system",
+      "install_id": "postgresql",
+      "license": "PostgreSQL",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "postgresql-15.17",
+      "pname": "postgresql_15",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:03:58.792625Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "15.17",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/7pvhn0w09hcna9zj8y9lnjqi3djacvbx-postgresql-15.17-dev",
+        "doc": "/nix/store/qklrvpjpggjjvfxib77rnsll87ir7z1x-postgresql-15.17-doc",
+        "jit": "/nix/store/wy25l68a2kjc09r1g446wki4ai4f5xyi-postgresql-15.17-jit",
+        "lib": "/nix/store/vnd78cyjcr92dg1p8245ij833k0vj68l-postgresql-15.17-lib",
+        "man": "/nix/store/3xsynwalmhcs289219spalzrcjj4xcw4-postgresql-15.17-man",
+        "out": "/nix/store/16r71pjb4xhq2vsx59g1ms6c3r21q7wa-postgresql-15.17",
+        "plperl": "/nix/store/7pkjrwzsjk1k95ah58bv1gy4r9l5cx7g-postgresql-15.17-plperl",
+        "plpython3": "/nix/store/79h8m55267fhig4yvqj54cpap2mzyv5w-postgresql-15.17-plpython3",
+        "pltcl": "/nix/store/pfx8dpw3d826iri00przak7ys57a28f2-postgresql-15.17-pltcl"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "postgresql_15",
+      "broken": false,
+      "derivation": "/nix/store/073jql4b14knb2i5mb9mj49jsa8ymzfp-postgresql-15.17.drv",
+      "description": "Powerful, open source object-relational database system",
+      "install_id": "postgresql",
+      "license": "PostgreSQL",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "postgresql-15.17",
+      "pname": "postgresql_15",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:37:35.041376Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "15.17",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/2c99sx1igc295f1d957xjiccy2rr6gdx-postgresql-15.17-debug",
+        "dev": "/nix/store/qysq0r6zg37b710y7xmgaya684c03cm7-postgresql-15.17-dev",
+        "doc": "/nix/store/5lnq35mx8v7b1hlas35ww49mvkgagvp2-postgresql-15.17-doc",
+        "jit": "/nix/store/3cvmavn0ga0dp3nidzzv44q5lmsgavv2-postgresql-15.17-jit",
+        "lib": "/nix/store/nnkf2jpgzvivbjn7q23sjwfr8v5bbghf-postgresql-15.17-lib",
+        "man": "/nix/store/2c4psk0xx57a5dg3qb29lf0dldkyjnpx-postgresql-15.17-man",
+        "out": "/nix/store/dvz5y3wag3k7532ppk3yz8gldaivmfcs-postgresql-15.17",
+        "plperl": "/nix/store/645x3lw9sw9phiwndq1s4bd4aali4hxv-postgresql-15.17-plperl",
+        "plpython3": "/nix/store/r0p2dp1nn8q73p2bqm8230zkzv2fm0w6-postgresql-15.17-plpython3",
+        "pltcl": "/nix/store/f6g88blxv20gx7mndc1mkf5jq9l4n7b1-postgresql-15.17-pltcl"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "postgresql_15",
+      "broken": false,
+      "derivation": "/nix/store/vsrs91db89gnx5ly7jx3gl2wh2wgcix9-postgresql-15.17.drv",
+      "description": "Powerful, open source object-relational database system",
+      "install_id": "postgresql",
+      "license": "PostgreSQL",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "postgresql-15.17",
+      "pname": "postgresql_15",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:45:43.301617Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "15.17",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/vx42zv422mssji5pxa5jrxdv7pw51fh5-postgresql-15.17-debug",
+        "dev": "/nix/store/wz863bn9pl61gnrx5n05baxaqmvfp61j-postgresql-15.17-dev",
+        "doc": "/nix/store/q3828a2ysknpy51w3zfci7l5j8jjdvhw-postgresql-15.17-doc",
+        "jit": "/nix/store/c2q5b04anfi7cqm9r1djwnyc8q5l0szq-postgresql-15.17-jit",
+        "lib": "/nix/store/7mbg3llmmrkxlcxwxkkzbp3az5dc46vw-postgresql-15.17-lib",
+        "man": "/nix/store/7sh7w6dxh6wrlvvajdsir324hj59w1wy-postgresql-15.17-man",
+        "out": "/nix/store/nrpayhflsn8phiwv2bb3pyz9iflpvqjn-postgresql-15.17",
+        "plperl": "/nix/store/2av427wsbphl2r70g6zq8r3i663z2x8i-postgresql-15.17-plperl",
+        "plpython3": "/nix/store/qhks0ysq3893a50v42sv3m4n2c1gbzpc-postgresql-15.17-plpython3",
+        "pltcl": "/nix/store/m2ww67sw6n91glibhgz7vccwq2i2g366-postgresql-15.17-pltcl"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "python312",
+      "broken": false,
+      "derivation": "/nix/store/5ncdapm2p40gqcfdq8xm6kadya37fh8i-python3-3.12.13.drv",
+      "description": "High-level dynamically-typed programming language",
+      "install_id": "python312",
+      "license": "Python-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "python3-3.12.13",
+      "pname": "python312",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:03:59.654889Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "python3-3.12.13",
+      "outputs_to_install": [
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/i61paf2j8s4386774b42jzrk0vwazs98-python3-3.12.13"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "python312",
+      "broken": false,
+      "derivation": "/nix/store/f5ff69d808qi0jxlfp08xghdfpl660w7-python3-3.12.13.drv",
+      "description": "High-level dynamically-typed programming language",
+      "install_id": "python312",
+      "license": "Python-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "python3-3.12.13",
+      "pname": "python312",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:37:36.390370Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "python3-3.12.13",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/92hp83hx7nz2ql9kzpgl63h2rgyr2a2b-python3-3.12.13-debug",
+        "out": "/nix/store/my7zqjp1gw9xa72p6ik81jchfgik8naf-python3-3.12.13"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "python312",
+      "broken": false,
+      "derivation": "/nix/store/p6x25i0mj5c1pvhm8h2qmq79xd1w5gqf-python3-3.12.13.drv",
+      "description": "High-level dynamically-typed programming language",
+      "install_id": "python312",
+      "license": "Python-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "python3-3.12.13",
+      "pname": "python312",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:45:44.765283Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "python3-3.12.13",
+      "outputs_to_install": [
+        "out",
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/6r8c9jpb9wmfnw33fr11qp067xkxwabp-python3-3.12.13-debug",
+        "out": "/nix/store/3437kliwcg0aq7h30alls8mvsv6laarf-python3-3.12.13"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "rabbitmq-server",
+      "broken": false,
+      "derivation": "/nix/store/f9ahr2hrll6ngl5kss5k48sgly26zb8a-rabbitmq-server-4.2.5.drv",
+      "description": "Implementation of the AMQP messaging protocol",
+      "install_id": "rabbitmq-server",
+      "license": "MPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "rabbitmq-server-4.2.5",
+      "pname": "rabbitmq-server",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:04:45.680440Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "4.2.5",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/jzzzxygdwrj79hwhw22k52s8jl3vaxhx-rabbitmq-server-4.2.5-doc",
+        "man": "/nix/store/fmx4j8qrk2j7ym1c5ixhdh3aapfwdxdr-rabbitmq-server-4.2.5-man",
+        "out": "/nix/store/2v18ka01d51sg4dhgbirq2153lx1p586-rabbitmq-server-4.2.5"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "rabbitmq-server",
+      "broken": false,
+      "derivation": "/nix/store/4cay7yk5pfbhvqjb6qkd6838ddjyayq8-rabbitmq-server-4.2.5.drv",
+      "description": "Implementation of the AMQP messaging protocol",
+      "install_id": "rabbitmq-server",
+      "license": "MPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "rabbitmq-server-4.2.5",
+      "pname": "rabbitmq-server",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:38:33.546417Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "4.2.5",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/isnnd01hbqy44ijjbcd4rrq56hrax9zx-rabbitmq-server-4.2.5-doc",
+        "man": "/nix/store/nxjivpmy9856ff3d76n63xl5njcy0gr6-rabbitmq-server-4.2.5-man",
+        "out": "/nix/store/rh98r8cq5qd1zc1skh5pjzccczd6mv5c-rabbitmq-server-4.2.5"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "rabbitmq-server",
+      "broken": false,
+      "derivation": "/nix/store/zs8h134h3zh0dmpjpkxgya4x04ixk73a-rabbitmq-server-4.2.5.drv",
+      "description": "Implementation of the AMQP messaging protocol",
+      "install_id": "rabbitmq-server",
+      "license": "MPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "rabbitmq-server-4.2.5",
+      "pname": "rabbitmq-server",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:46:45.544666Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "4.2.5",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/p95crx6d9s11y1y51qsdvqflckxj9m7g-rabbitmq-server-4.2.5-doc",
+        "man": "/nix/store/qb0v08n3ybs63jchkpzq1q0xnw4vs4fa-rabbitmq-server-4.2.5-man",
+        "out": "/nix/store/sr31klg18magmcjbfadhrp8g1ljvazr4-rabbitmq-server-4.2.5"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "valkey",
+      "broken": false,
+      "derivation": "/nix/store/q54wq7xchvay1yn5fbb6qs5b10nxnn9q-valkey-9.0.3.drv",
+      "description": "High-performance data structure server that primarily serves key/value workloads",
+      "install_id": "valkey",
+      "license": "BSD-3-Clause",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "valkey-9.0.3",
+      "pname": "valkey",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:05:51.122485Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "9.0.3",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/9yfjp53flpa72j4rasdlp9zrfm354w2c-valkey-9.0.3"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "valkey",
+      "broken": false,
+      "derivation": "/nix/store/796i4nj9h0glxmmar0a33xlp6pxbvjdg-valkey-9.0.3.drv",
+      "description": "High-performance data structure server that primarily serves key/value workloads",
+      "install_id": "valkey",
+      "license": "BSD-3-Clause",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "valkey-9.0.3",
+      "pname": "valkey",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T06:39:58.836460Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "9.0.3",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/mdr5kwga7lx0ccqfjcplcb6yph2mh5m4-valkey-9.0.3"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "valkey",
+      "broken": false,
+      "derivation": "/nix/store/79dg6xknnd2jk1hdwrdn9jc0ixzxxyvw-valkey-9.0.3.drv",
+      "description": "High-performance data structure server that primarily serves key/value workloads",
+      "install_id": "valkey",
+      "license": "BSD-3-Clause",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "name": "valkey-9.0.3",
+      "pname": "valkey",
+      "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+      "rev_count": 982522,
+      "rev_date": "2026-04-18T21:33:21Z",
+      "scrape_date": "2026-04-21T07:48:16.353610Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "9.0.3",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/915i10q2hxk5f6vk7h0n7sbkpafqll1r-valkey-9.0.3"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}
