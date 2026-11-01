@@ -7,8 +7,10 @@ WORKDIR /app
 
 COPY . .
 
-RUN corepack enable pnpm && pnpm add -g turbo
-RUN pnpm install
+# Bun as package manager; Node stays for vite/tsdown shebangs
+COPY --from=oven/bun:1.4-alpine /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
+RUN bun install
 
 EXPOSE 3002
 
@@ -16,4 +18,4 @@ ENV VITE_SPACE_BASE_PATH="/spaces"
 
 VOLUME [ "/app/node_modules", "/app/apps/space/node_modules"]
 
-CMD ["pnpm", "dev", "--filter=space"]
+CMD ["bun", "run", "dev", "--filter=space"]
