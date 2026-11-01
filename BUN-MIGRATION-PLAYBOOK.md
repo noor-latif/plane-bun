@@ -52,7 +52,8 @@ package solo PASSED at baseline (44 s) but FAILED on the after side; the
 single file alone passes on both (77/77, 34 s). The baseline recorded it at
 turbo's **default concurrency** — do not pin `--concurrency` on either side.
 Decision rule (§8): the file must pass alone; a package-solo failure is a
-recorded finding under bun's hoisted layout, not an automatic STOP. Do not
+recorded finding under bun on **any** layout (verified: package-solo fails on
+both hoisted and isolated, 2026-11-01), not an automatic STOP. Do not
 "fix" that test.
 
 ## 1. Verified compatibility facts (ground truth; do not re-litigate)
@@ -507,14 +508,17 @@ stop and hand back the branch with the failure log.
 | WS handshake p50/p95, conns/s | 1/1 ms, 1597         | 0/1 ms, 2153 host / 2186 in-image | single run each; ~+35% direction only (Node client both sides) |
 | web dev boot                  | 4.98 s               | 5.39 s      | ~parity (hoisted read 3.52 s; layout-sensitive) |
 | web dev idle PSS (12 s tree)  | 2.24 GB              | 1.86 GB     | −17% (single run; hoisted read 529 MB — high run variance) |
-| full tests, default conc.     | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5 s, exit 1 (package-solo FAIL; file-solo 77/77 34 s) | −14% wall; flake envelope widened, see finding |
+| full tests, default conc.     | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5/77.8 s, exit 1 — **on both bun layouts** (package-solo FAIL; file-solo 77/77 in ~33 s) | −14% wall; package-solo flip is bun-wide, see finding |
 
 Finding (recorded, not fixed): the `@plane/blocks` select keyboard-walk
-flake timed out **solo** on the after side (baseline: passed solo). Same
-vitest 4.1.11, same Node 22.22; the file passes alone (77/77, 34 s). Under
-bun's hoisted layout the flake envelope widens — matched-condition full-suite
-runs red on BOTH sides; treat any solo-run of that package as the decision
-rule, not "package-solo = green".
+flake times out **package-solo** under bun (baseline: passed package-solo).
+Same vitest 4.1.11, same Node 22.22; the file passes alone on every side
+(77/77, ~33 s). Verified layout-independent: package-solo fails under bun
+hoisted AND isolated (pnpm-parity), so the flip is a bun-runtime difference,
+not a link-layout artifact. Suspected residue (unverified): pnpm's
+`public-hoist-pattern` (typescript, eslint, `*@plane/*`, vite) has no bun
+equivalent. Full-suite runs are red on BOTH sides; the file-solo pass is the
+decision rule (§8), not "package-solo = green".
 
 Probes (bun VM, 1.4.4): vite 8.2.4 runs under bun (`bun --bun vite --version`
 → `bun-v26.3.0` banner); tsdown banner OK; oxlint 1.51.0 exit 0; vitest 4.1.11
