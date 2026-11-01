@@ -2,18 +2,18 @@
   "lockfile-version": 1,
   "manifest": {
     "schema-version": "1.19.0",
-    "description": "  Plane, self-hosted locally from the Flox Catalog.\n\n  Toolchain: Node 22, pnpm 11.10.0, Python 3.12, uv.\n  Services: PostgreSQL 15, Valkey, RabbitMQ, MinIO, the Django API and the\n  four React Router apps.\n\n  Get everything up:\n\n      flox activate\n      flox services start\n\n  Register the instance admin at http://localhost:3001/god-mode/ and then log\n  in at http://localhost:3000. Service data lives in .flox/data.\n",
+    "description": "  Plane, self-hosted locally from the Flox Catalog.\n\n  Toolchain: Node 22, Bun 1.4.2, Python 3.12, uv.\n  Services: PostgreSQL 15, Valkey, RabbitMQ, MinIO, the Django API and the\n  four React Router apps.\n\n  Get everything up:\n\n      flox activate\n      flox services start\n\n  Register the instance admin at http://localhost:3001/god-mode/ and then log\n  in at http://localhost:3000. Service data lives in .flox/data.\n",
     "install": {
+      "bun": {
+        "pkg-path": "bun",
+        "pkg-group": "bun",
+        "version": "1.4.2"
+      },
       "minio": {
         "pkg-path": "minio"
       },
       "nodejs": {
         "pkg-path": "nodejs_22"
-      },
-      "pnpm": {
-        "pkg-path": "pnpm",
-        "pkg-group": "pnpm",
-        "version": "11.10.0"
       },
       "postgresql": {
         "pkg-path": "postgresql_15"
@@ -45,7 +45,7 @@
         }
       },
       "bootstrap": {
-        "command": "  set -euo pipefail\n  root=\"$FLOX_ENV_PROJECT\"\n\n  # The catalog has no uv build matching apps/api/pyproject.toml's\n  # required-version, so fetch that exact release once.\n  want=\"$(sed -n 's/^required-version *= *\"==\\(.*\\)\"/\\1/p' \"$root/apps/api/pyproject.toml\")\"\n  have=\"$(uv --version 2>/dev/null | awk '{print $2}' || true)\"\n  if [ -n \"$want\" ] && [ \"$have\" != \"$want\" ]; then\n    curl -LsSf \"https://astral.sh/uv/$want/install.sh\" \\\n      | env UV_INSTALL_DIR=\"$PLANE_DATA/uv/bin\" INSTALLER_NO_MODIFY_PATH=1 sh\n  fi\n\n  pnpm install --frozen-lockfile\n\n  for _ in $(seq 60); do\n    pg_isready -h 127.0.0.1 -p 5433 -U plane >/dev/null 2>&1 && break\n    sleep 1\n  done\n  createdb -h 127.0.0.1 -p 5433 -U plane plane 2>/dev/null || true\n\n  # The API connects as plane/plane on vhost plane. rabbitmqctl needs the same\n  # HOME (Erlang cookie) as the service; readiness is polled, not assumed.\n  (\n    export HOME=\"$PLANE_DATA/rabbitmq/home\"\n    for _ in $(seq 60); do\n      rabbitmqctl -q status >/dev/null 2>&1 && break\n      sleep 1\n    done\n    if rabbitmqctl -q list_users | cut -f1 | grep -qx plane; then\n      rabbitmqctl -q change_password plane plane\n    else\n      rabbitmqctl -q add_user plane plane\n    fi\n    rabbitmqctl -q add_vhost plane || true\n    rabbitmqctl -q set_permissions -p plane plane \".*\" \".*\" \".*\"\n  )\n\n  uv sync --project \"$root/apps/api\"\n\n  set -a; . \"$root/apps/api/.env\"; set +a\n  cd \"$root/apps/api\"\n  uv run python manage.py migrate --settings=plane.settings.local\n",
+        "command": "  set -euo pipefail\n  root=\"$FLOX_ENV_PROJECT\"\n\n  # The catalog has no uv build matching apps/api/pyproject.toml's\n  # required-version, so fetch that exact release once.\n  want=\"$(sed -n 's/^required-version *= *\"==\\(.*\\)\"/\\1/p' \"$root/apps/api/pyproject.toml\")\"\n  have=\"$(uv --version 2>/dev/null | awk '{print $2}' || true)\"\n  if [ -n \"$want\" ] && [ \"$have\" != \"$want\" ]; then\n    curl -LsSf \"https://astral.sh/uv/$want/install.sh\" \\\n      | env UV_INSTALL_DIR=\"$PLANE_DATA/uv/bin\" INSTALLER_NO_MODIFY_PATH=1 sh\n  fi\n\n  bun install --frozen-lockfile\n\n  for _ in $(seq 60); do\n    pg_isready -h 127.0.0.1 -p 5433 -U plane >/dev/null 2>&1 && break\n    sleep 1\n  done\n  createdb -h 127.0.0.1 -p 5433 -U plane plane 2>/dev/null || true\n\n  # The API connects as plane/plane on vhost plane. rabbitmqctl needs the same\n  # HOME (Erlang cookie) as the service; readiness is polled, not assumed.\n  (\n    export HOME=\"$PLANE_DATA/rabbitmq/home\"\n    for _ in $(seq 60); do\n      rabbitmqctl -q status >/dev/null 2>&1 && break\n      sleep 1\n    done\n    if rabbitmqctl -q list_users | cut -f1 | grep -qx plane; then\n      rabbitmqctl -q change_password plane plane\n    else\n      rabbitmqctl -q add_user plane plane\n    fi\n    rabbitmqctl -q add_vhost plane || true\n    rabbitmqctl -q set_permissions -p plane plane \".*\" \".*\" \".*\"\n  )\n\n  uv sync --project \"$root/apps/api\"\n\n  set -a; . \"$root/apps/api/.env\"; set +a\n  cd \"$root/apps/api\"\n  uv run python manage.py migrate --settings=plane.settings.local\n",
         "shutdown": {
           "timeout-seconds": 10
         },
@@ -81,7 +81,7 @@
         "command": "exec valkey-server --bind 127.0.0.1 --port 6379 --dir \"$PLANE_DATA/valkey\" --appendonly no"
       },
       "web": {
-        "command": "exec pnpm dev",
+        "command": "exec bun run dev",
         "depends-on": {
           "bootstrap": {
             "condition": "process_completed_successfully"
@@ -91,93 +91,6 @@
     }
   },
   "packages": [
-    {
-      "attr_path": "pnpm",
-      "broken": false,
-      "derivation": "/nix/store/sh9i70w1g7xdyi5827kqv90gphzzpkfy-pnpm-11.10.0.drv",
-      "description": "Fast, disk space efficient package manager for JavaScript",
-      "install_id": "pnpm",
-      "license": "MIT",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "name": "pnpm-11.10.0",
-      "pname": "pnpm",
-      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "rev_count": 1032869,
-      "rev_date": "2026-07-11T13:29:52Z",
-      "scrape_date": "2026-07-15T17:22:11.373249Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "11.10.0",
-      "outputs_to_install": [
-        "out"
-      ],
-      "outputs": {
-        "out": "/nix/store/gcf9bdk1fpdkzicq8qa53x3kxgfgd78s-pnpm-11.10.0"
-      },
-      "system": "aarch64-darwin",
-      "group": "pnpm",
-      "priority": 5
-    },
-    {
-      "attr_path": "pnpm",
-      "broken": false,
-      "derivation": "/nix/store/0p6vcrzbff7xbw6q1ib4fc7lx3syak2a-pnpm-11.10.0.drv",
-      "description": "Fast, disk space efficient package manager for JavaScript",
-      "install_id": "pnpm",
-      "license": "MIT",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "name": "pnpm-11.10.0",
-      "pname": "pnpm",
-      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "rev_count": 1032869,
-      "rev_date": "2026-07-11T13:29:52Z",
-      "scrape_date": "2026-07-15T18:22:53.246136Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "11.10.0",
-      "outputs_to_install": [
-        "out"
-      ],
-      "outputs": {
-        "out": "/nix/store/sv9kq9vr0iybrqrimy5m6kyi2ybnrdv1-pnpm-11.10.0"
-      },
-      "system": "aarch64-linux",
-      "group": "pnpm",
-      "priority": 5
-    },
-    {
-      "attr_path": "pnpm",
-      "broken": false,
-      "derivation": "/nix/store/6jwxzs28ffji9w3cljd5fpgqk4rjh5s8-pnpm-11.10.0.drv",
-      "description": "Fast, disk space efficient package manager for JavaScript",
-      "install_id": "pnpm",
-      "license": "MIT",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "name": "pnpm-11.10.0",
-      "pname": "pnpm",
-      "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
-      "rev_count": 1032869,
-      "rev_date": "2026-07-11T13:29:52Z",
-      "scrape_date": "2026-07-15T19:30:06.786739Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "11.10.0",
-      "outputs_to_install": [
-        "out"
-      ],
-      "outputs": {
-        "out": "/nix/store/kbd2pvl8kq3jpq954bicmr4rrvib77wg-pnpm-11.10.0"
-      },
-      "system": "x86_64-linux",
-      "group": "pnpm",
-      "priority": 5
-    },
     {
       "attr_path": "minio",
       "broken": false,
@@ -784,6 +697,96 @@
       },
       "system": "x86_64-linux",
       "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bun",
+      "broken": false,
+      "derivation": "/nix/store/f23cfy3n50pzsx5apyxmwfmlkjnwkiqa-bun-1.4.2.drv",
+      "description": "Incredibly fast JavaScript runtime, bundler, transpiler and package manager – all in one",
+      "install_id": "bun",
+      "license": "[ MIT, LGPL-2.1-only ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=1c89083e451e891152365b799595cf7790a43325",
+      "name": "bun-1.4.2",
+      "pname": "bun",
+      "rev": "1c89083e451e891152365b799595cf7790a43325",
+      "rev_count": 1105037,
+      "rev_date": "2026-10-30T06:21:25Z",
+      "scrape_date": "2026-10-31T05:47:33.209338Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.4.2",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/wjpdgxsjymr2nczy9y3d5h3h1xrbhhml-bun-1.4.2"
+      },
+      "system": "aarch64-darwin",
+      "group": "bun",
+      "priority": 5
+    },
+    {
+      "attr_path": "bun",
+      "broken": false,
+      "derivation": "/nix/store/3239bpm54higlwfdznq8cbsi4ln35fri-bun-1.4.2.drv",
+      "description": "Incredibly fast JavaScript runtime, bundler, transpiler and package manager – all in one",
+      "install_id": "bun",
+      "license": "[ MIT, LGPL-2.1-only ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=1c89083e451e891152365b799595cf7790a43325",
+      "name": "bun-1.4.2",
+      "pname": "bun",
+      "rev": "1c89083e451e891152365b799595cf7790a43325",
+      "rev_count": 1105037,
+      "rev_date": "2026-10-30T06:21:25Z",
+      "scrape_date": "2026-10-31T06:15:34.329330Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.4.2",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/f8hiv5nmim0dpaxixmxiijdm8x0mffsy-bun-1.4.2"
+      },
+      "system": "aarch64-linux",
+      "group": "bun",
+      "priority": 5
+    },
+    {
+      "attr_path": "bun",
+      "broken": false,
+      "derivation": "/nix/store/4ql11clbibnp4l68sf11j49fkaf0zivl-bun-1.4.2.drv",
+      "description": "Incredibly fast JavaScript runtime, bundler, transpiler and package manager – all in one",
+      "install_id": "bun",
+      "license": "[ MIT, LGPL-2.1-only ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=1c89083e451e891152365b799595cf7790a43325",
+      "name": "bun-1.4.2",
+      "pname": "bun",
+      "rev": "1c89083e451e891152365b799595cf7790a43325",
+      "rev_count": 1105037,
+      "rev_date": "2026-10-30T06:21:25Z",
+      "scrape_date": "2026-10-31T06:45:53.745350Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.4.2",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/2mxhj3nrvxxqm6gf6rwnrvz048zqdclp-bun-1.4.2"
+      },
+      "system": "x86_64-linux",
+      "group": "bun",
       "priority": 5
     }
   ]

@@ -10,7 +10,7 @@ schema-version = "1.19.0"
 description = '''
   Plane, self-hosted locally from the Flox Catalog.
 
-  Toolchain: Node 22, pnpm 11.10.0, Python 3.12, uv.
+  Toolchain: Node 22, Bun 1.4.2, Python 3.12, uv.
   Services: PostgreSQL 15, Valkey, RabbitMQ, MinIO, the Django API and the
   four React Router apps.
 
@@ -25,9 +25,9 @@ description = '''
 
 [install]
 nodejs.pkg-path = "nodejs_22"
-pnpm.pkg-path = "pnpm"
-pnpm.version = "11.10.0"
-pnpm.pkg-group = "pnpm"
+bun.pkg-path = "bun"
+bun.version = "1.4.2"
+bun.pkg-group = "bun"
 python312.pkg-path = "python312"
 postgresql.pkg-path = "postgresql_15"
 valkey.pkg-path = "valkey"
@@ -119,7 +119,7 @@ command = '''
       | env UV_INSTALL_DIR="$PLANE_DATA/uv/bin" INSTALLER_NO_MODIFY_PATH=1 sh
   fi
 
-  pnpm install --frozen-lockfile
+  bun install --frozen-lockfile
 
   for _ in $(seq 60); do
     pg_isready -h 127.0.0.1 -p 5433 -U plane >/dev/null 2>&1 && break
@@ -168,5 +168,5 @@ depends-on.bootstrap = { condition = "process_completed_successfully" }
 depends-on.minio = { condition = "process_started" }
 
 [services.web]
-command = 'exec pnpm dev'
+command = 'exec bun run dev'
 depends-on.bootstrap = { condition = "process_completed_successfully" }
