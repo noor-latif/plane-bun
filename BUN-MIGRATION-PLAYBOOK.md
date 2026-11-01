@@ -181,6 +181,13 @@ to make install pass — they are CVE pins.
 # Key verified against bun 1.4.4 (install completes; treat lockfile as frozen
 # by default so --frozen-lockfile in CI is a no-op guard, not the only guard).
 frozenLockfile = true
+# Restore the deleted .npmrc's node-linker=isolated choice. Bun defaults
+# pre-1.3.2 projects to hoisted, which measured 67.9 s build --force vs
+# 39.0 s isolated (baseline pnpm 49-55 s). Verified: bare `bun install`
+# honors this key, so CI/Docker inherit it without flags. Dockerfiles must
+# COPY bunfig.toml into pruned installers or in-image installs revert to
+# hoisted.
+linker = "isolated"
 ```
 
 This repo sets no active pnpm `minimumReleaseAge`, so nothing else migrates
@@ -477,20 +484,20 @@ stop and hand back the branch with the failure log.
 
 ## 9. Results table (fill after Phase 7)
 
-| Metric                                          | baseline (pnpm/node)                      | after (bun)                                              | Δ                                                             |
-| ----------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
-| cold install (1×, network-bound both sides)     | 9.2 s                                     | 19.1 s                                                   | +108% (bun cache 847 MB vs pnpm store 831 MB, `du -sb` both)  |
-| warm install (3×)                               | 1.75 s                                    | 0.05 s                                                   | −97%                                                          |
-| node_modules (`du -sb`)                         | 816 MB                                    | 847 MB                                                   | +4% (hoisted linker; no disk win)                             |
-| bun.lock vs pnpm-lock.yaml                      | 496,954 B                                 | 370,658 B                                                | −25%                                                          |
-| build --force (2× vs 1×)                        | 49.2–55.0 s                               | 67.9 s                                                   | +23–38% (turbo: 15/15 green; peak PSS not measured)           |
-| live boot → 200 (host runtime)                  | 2.41 s                                    | 0.91 s                                                   | −62%                                                          |
-| live idle PSS (12 s mean, `sample_rss.py` tree) | 252 MB                                    | 207 MB                                                   | −18%                                                          |
-| WS handshake p50/p95, conns/s                   | 1/1 ms, 1597                              | 0/1 ms, 2417                                             | single run each; +51% direction only (Node client both sides) |
-| WS in-container (image)                         | —                                         | 200/200, 2333 conns/s                                    | runner claim proven in-image                                  |
-| web dev boot (harness)                          | 4.98 s                                    | 3.52 s                                                   | −29%                                                          |
-| web dev idle PSS (12 s tree)                    | 2.24 GB                                   | 529 MB                                                   | −76%                                                          |
-| full tests, default conc.                       | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5 s, exit 1 (package-solo FAIL; file-solo 77/77 34 s) | −14% wall; flake envelope widened, see finding                |
+| Metric                        | baseline (pnpm/node) | after (bun) | Δ   |
+| ----------------------------- | -------------------- | ----------- | --- |
+| cold install (1×, network-bound both sides) | 9.2 s | 19.1 s | +108% (bun cache 847 MB vs pnpm store 831 MB, `du -sb` both) |
+| warm install (3×)             | 1.75 s               | 0.05 s      | −97% |
+| node_modules (`du -sb`)       | 816 MB               | 847 MB      | +4% (isolated linker; layout parity restored) |
+| bun.lock vs pnpm-lock.yaml    | 496,954 B            | 370,658 B   | −25% |
+| build --force (isolated linker) | 49.2–55.0 s        | 39.0 s      | **−20–29%** (hoisted layout measured 67.9 s — layout, not bun) |
+| build peak tree PSS           | 4.29 GB              | not measured | — |
+| live boot → 200               | 2.41 s               | 0.92 s      | −62% (identical on both layouts) |
+| live idle PSS (12 s tree)     | 252 MB               | 207 MB      | −18% |
+| WS handshake p50/p95, conns/s | 1/1 ms, 1597         | 0/1 ms, 2153 host / 2186 in-image | single run each; ~+35% direction only (Node client both sides) |
+| web dev boot                  | 4.98 s               | 5.39 s      | ~parity (hoisted read 3.52 s; layout-sensitive) |
+| web dev idle PSS (12 s tree)  | 2.24 GB              | 1.86 GB     | −17% (single run; hoisted read 529 MB — high run variance) |
+| full tests, default conc.     | 77.7 s, exit 1 (package-solo PASS 44.3 s) | 66.5 s, exit 1 (package-solo FAIL; file-solo 77/77 34 s) | −14% wall; flake envelope widened, see finding |
 
 Finding (recorded, not fixed): the `@plane/blocks` select keyboard-walk
 flake timed out **solo** on the after side (baseline: passed solo). Same
