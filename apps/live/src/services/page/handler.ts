@@ -9,7 +9,10 @@ import type { HocusPocusServerContext, TDocumentTypes } from "@/types";
 // services
 import { ProjectPageService } from "./project-page.service";
 
-export const getPageService = (documentType: TDocumentTypes, context: HocusPocusServerContext) => {
+export const getPageService = (
+  documentType: TDocumentTypes,
+  context: Pick<HocusPocusServerContext, "documentType" | "workspaceSlug" | "projectId" | "cookie" | "userId">
+) => {
   if (documentType === "project_page") {
     return new ProjectPageService({
       workspaceSlug: context.workspaceSlug,

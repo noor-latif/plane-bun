@@ -19,10 +19,6 @@ export type TUserMention = {
 export abstract class PageCoreService extends APIService {
   protected abstract basePath: string;
 
-  constructor() {
-    super();
-  }
-
   async fetchDetails(pageId: string): Promise<TPage> {
     try {
       const response = await this.get(`${this.basePath}/pages/${pageId}/`, {
@@ -115,10 +111,11 @@ export abstract class PageCoreService extends APIService {
     }
   }
 
-  async updateDescriptionBinary(pageId: string, data: TDocumentPayload): Promise<any> {
+  async updateDescriptionBinary(pageId: string, data: TDocumentPayload, timeoutMs?: number): Promise<any> {
     try {
       const response = await this.patch(`${this.basePath}/pages/${pageId}/description/`, data, {
         headers: this.getHeader(),
+        ...(timeoutMs ? { timeout: timeoutMs } : {}),
       });
       return response?.data as unknown;
     } catch (error) {

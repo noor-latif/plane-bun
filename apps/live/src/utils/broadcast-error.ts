@@ -16,7 +16,7 @@ export const broadcastError = async (
   pageId: string,
   errorMessage: string,
   errorType: "fetch" | "store",
-  context: HocusPocusServerContext,
+  context: Pick<HocusPocusServerContext, "workspaceSlug" | "userId">,
   errorCode?: "content_too_large" | "page_locked" | "page_archived",
   shouldDisconnect?: boolean
 ) => {
@@ -38,7 +38,7 @@ export const broadcastError = async (
     });
 
     await broadcastMessageToPage(hocuspocusServerInstance, pageId, errorEvent);
-  } catch (broadcastError) {
-    logger.error("Error broadcasting error message to frontend:", broadcastError);
+  } catch (broadcastFailure) {
+    logger.error("Error broadcasting error message to frontend:", broadcastFailure);
   }
 };
