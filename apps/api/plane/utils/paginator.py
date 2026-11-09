@@ -60,16 +60,17 @@ class Cursor:
 
 
 class CursorResult(Sequence):
-    def __init__(self, results, next, prev, hits=None, max_hits=None):
+    def __init__(self, results, next, prev, hits=None, max_hits=None, length=None):
         self.results = results
         self.next = next
         self.prev = prev
         self.hits = hits
         self.max_hits = max_hits
+        self.length = length
 
     def __len__(self):
         # Return the length of the results
-        return len(self.results)
+        return self.length if self.length is not None else len(self.results)
 
     def __iter__(self):
         # Return the iterator of the results
@@ -211,7 +212,7 @@ class GroupedOffsetPaginator(OffsetPaginator):
         **kwargs,
     ):
         # Initiate the parent class for all the parameters
-        super().__init__(queryset, *args, **kwargs)
+        super().__init__(queryset, total_count_queryset=total_count_queryset, *args, **kwargs)
 
         # Set the group by field name
         self.group_by_field_name = group_by_field_name
@@ -274,12 +275,20 @@ class GroupedOffsetPaginator(OffsetPaginator):
         # Add previous cursors
         prev_cursor = Cursor(limit, page - 1, True, page > 0)
 
-        # Count the queryset
-        count = queryset.count()
+        # Count the queryset; the caller's pre-annotation queryset is used when
+        # supplied, as the plain offset paginator already does.
+        count = (
+            self.total_count_queryset.count()
+            if self.total_count_queryset is not None
+            else queryset.count()
+        )
+
+        # Exact page length without materializing the window page as models.
+        page_count = results.count()
 
         # Optionally, calculate the total count and max_hits if needed
         # This might require adjustments based on specific use cases
-        if results:
+        if page_count:
             max_hits = math.ceil(
                 queryset.values(self.group_by_field_name)
                 .annotate(count=Count("id", filter=self.count_filter, distinct=True))
@@ -294,6 +303,7 @@ class GroupedOffsetPaginator(OffsetPaginator):
             prev=prev_cursor,
             hits=count,
             max_hits=max_hits,
+            length=page_count,
         )
 
     def __get_total_queryset(self):
@@ -409,7 +419,7 @@ class SubGroupedOffsetPaginator(OffsetPaginator):
         **kwargs,
     ):
         # Initiate the parent class for all the parameters
-        super().__init__(queryset, *args, **kwargs)
+        super().__init__(queryset, total_count_queryset=total_count_queryset, *args, **kwargs)
 
         # Set the group by field name
         self.group_by_field_name = group_by_field_name
@@ -477,12 +487,20 @@ class SubGroupedOffsetPaginator(OffsetPaginator):
         # Add previous cursors
         prev_cursor = Cursor(limit, page - 1, True, page > 0)
 
-        # Count the queryset
-        count = queryset.count()
+        # Count the queryset; the caller's pre-annotation queryset is used when
+        # supplied, as the plain offset paginator already does.
+        count = (
+            self.total_count_queryset.count()
+            if self.total_count_queryset is not None
+            else queryset.count()
+        )
+
+        # Exact page length without materializing the window page as models.
+        page_count = results.count()
 
         # Optionally, calculate the total count and max_hits if needed
         # This might require adjustments based on specific use cases
-        if results:
+        if page_count:
             max_hits = math.ceil(
                 queryset.values(self.group_by_field_name)
                 .annotate(count=Count("id", filter=self.count_filter, distinct=True))
@@ -497,6 +515,7 @@ class SubGroupedOffsetPaginator(OffsetPaginator):
             prev=prev_cursor,
             hits=count,
             max_hits=max_hits,
+            length=page_count,
         )
 
     def __get_group_total_queryset(self):

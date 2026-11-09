@@ -3,11 +3,14 @@
 # See the LICENSE file for details.
 
 import pytest
+from django.db.models import Q
 from django.test import RequestFactory
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 
-from plane.db.models import Issue, Project, State
+from plane.app.views.issue.base import IssueViewSet
+from plane.db.models import Issue, IssueLabel, Label, Project, State
+from plane.utils.grouper import issue_on_results, issue_queryset_grouper
 from plane.utils.paginator import (
     BasePaginator,
     Cursor,
@@ -240,3 +243,132 @@ class TestGroupedPageSize:
             seen += [r["id"] for r in rows]
         assert len(set(seen)) == 6
         assert not result.next.has_results
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+class TestGroupedCountUsesDistinctIssues:
+    """Grouped pagination must count DISTINCT issues, not m2m membership rows.
+
+    Driven through BasePaginator().paginate() — the seam every grouped endpoint
+    uses — against the real database, so the counted querysets are real. Two
+    issues, one carrying two labels, give three membership rows; the pre-patch
+    grouped count is therefore 3 while the correct distinct-issue count is 2.
+    """
+
+    @pytest.fixture
+    def data(self, workspace):
+        project = Project.objects.create(name="Counts", identifier="CNTS", workspace=workspace)
+        state = State.objects.create(name="Todo", project=project, workspace=workspace)
+        label_a = Label.objects.create(name="A", project=project, workspace=workspace)
+        label_b = Label.objects.create(name="B", project=project, workspace=workspace)
+        issue_one = Issue.objects.create(name="one", state=state, project=project, workspace=workspace)
+        issue_two = Issue.objects.create(name="two", state=state, project=project, workspace=workspace)
+        IssueLabel.objects.create(issue=issue_one, label=label_a, project=project, workspace=workspace)
+        IssueLabel.objects.create(issue=issue_one, label=label_b, project=project, workspace=workspace)
+        IssueLabel.objects.create(issue=issue_two, label=label_a, project=project, workspace=workspace)
+        return {"project": project, "state": state, "labels": [label_a, label_b],
+                "issues": [issue_one, issue_two]}
+
+    @staticmethod
+    def _annotated(queryset):
+        # The real view annotates before the paginator (cycle/module/label
+        # subqueries); issue_on_results requires those annotations.
+        return IssueViewSet().apply_annotations(queryset)
+
+    def _paginate(self, queryset, total_count_queryset, group_by_fields,
+                  sub_group_by=None, sub_group_by_fields=None):
+        request = _make_request(per_page="50")
+        return BasePaginator().paginate(
+            request=request,
+            queryset=queryset,
+            paginator_cls=GroupedOffsetPaginator if sub_group_by is None else SubGroupedOffsetPaginator,
+            on_results=lambda issues: issue_on_results(
+                issues=issues, group_by="labels__id", sub_group_by=sub_group_by
+            ),
+            group_by_field_name="labels__id",
+            group_by_fields=group_by_fields,
+            sub_group_by_field_name=sub_group_by,
+            sub_group_by_fields=sub_group_by_fields,
+            count_filter=Q(),
+            total_count_queryset=total_count_queryset,
+            order_by="-created_at",
+            default_per_page=50,
+            max_per_page=1000,
+        )
+
+    def test_grouped_total_count_is_distinct_issue_count(self, data):
+        base = Issue.issue_objects.filter(project=data["project"]).distinct()
+        grouped = issue_queryset_grouper(queryset=self._annotated(base), group_by="labels__id", sub_group_by=None)
+        group_fields = [str(label.id) for label in data["labels"]] + ["None"]
+
+        # The distinct-issue count. The pre-patch paginator counted the windowed
+        # joined rows (3 memberships for 2 issues); see the captured pre-patch run.
+        assert base.count() == 2
+
+        response = self._paginate(grouped, base, group_fields)
+        assert response.data["total_count"] == 2
+        assert response.data["total_results"] == 2
+        # The m2m grouper lists an issue under each of its labels, so count
+        # distinct issue ids rather than group memberships.
+        visible_ids = {
+            issue["id"] for group in response.data["results"].values() for issue in group["results"]
+        }
+        assert len(visible_ids) == 2
+
+    def test_sub_grouped_total_count_is_distinct_issue_count(self, data):
+        base = Issue.issue_objects.filter(project=data["project"]).distinct()
+        grouped = issue_queryset_grouper(
+            queryset=self._annotated(base), group_by="labels__id", sub_group_by="priority"
+        )
+        response = self._paginate(
+            grouped, base, [str(label.id) for label in data["labels"]] + ["None"],
+            sub_group_by="priority", sub_group_by_fields=["low", "medium", "high", "urgent", "none"],
+        )
+        assert response.data["total_count"] == 2
+        assert response.data["total_results"] == 2
+
+    def test_none_fallback_keeps_annotated_count_for_public_surfaces(self, data):
+        base = Issue.issue_objects.filter(project=data["project"]).distinct()
+        grouped = issue_queryset_grouper(queryset=self._annotated(base), group_by="labels__id", sub_group_by=None)
+        group_fields = [str(label.id) for label in data["labels"]] + ["None"]
+        response = self._paginate(grouped, None, group_fields)
+        # Public space endpoints pass no counting queryset; their count stays the
+        # windowed annotated count (3 membership rows for 2 issues), which is the
+        # pre-patch behaviour. The un-windowed distinct count is 2.
+        assert grouped.count() == 2
+        assert response.data["total_count"] == 3
+        assert response.data["total_results"] == 3
+
+    def test_zero_label_issue_survives_only_in_the_counting_queryset(self, data):
+        """V1 observation: grouper filters are inner joins, the counting queryset is not."""
+        unlabeled = Issue.objects.create(
+            name="unlabeled", state=data["state"], project=data["project"], workspace=data["project"].workspace
+        )
+        base = Issue.issue_objects.filter(project=data["project"]).distinct()
+        grouped = issue_queryset_grouper(queryset=self._annotated(base), group_by="labels__id", sub_group_by=None)
+        assert base.count() == 3  # includes the unlabeled issue
+        response = self._paginate(grouped, base, [str(label.id) for label in data["labels"]] + ["None"])
+        visible_ids = {
+            issue["id"]
+            for group in response.data["results"].values()
+            for issue in group["results"]
+        }
+        # V1 observed: the grouper's label filter is a LEFT OUTER join, so the
+        # unlabeled issue survives under the "None" group and the distinct count
+        # agrees with the visible rows (3 == 3), not 3 vs 2.
+        assert "None" in response.data["results"]
+        assert unlabeled.id in visible_ids
+        assert response.data["total_count"] == 3
+        assert len(visible_ids) == 3
+
+    def test_non_distinct_counting_queryset_keeps_membership_rows(self, data):
+        """V3 observation: surfaces without .distinct() stay unchanged-wrong."""
+        base = Issue.issue_objects.filter(project=data["project"]).distinct()
+        grouped = issue_queryset_grouper(queryset=self._annotated(base), group_by="labels__id", sub_group_by=None)
+        labels = data["labels"]
+        membership = Issue.issue_objects.filter(project=data["project"], labels__id__in=[l.id for l in labels])
+        assert membership.count() == 3
+        assert membership.distinct().count() == 2
+        response = self._paginate(grouped, membership, [str(label.id) for label in labels] + ["None"])
+        assert response.data["total_count"] == 3
