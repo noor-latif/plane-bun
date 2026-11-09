@@ -1,0 +1,72 @@
+--- a/@hocuspocus/server/dist/hocuspocus-server.esm.js
++++ b/@hocuspocus/server/dist/hocuspocus-server.esm.js
+@@ -2146,6 +2146,8 @@
+     }
+ }
+ 
++const MAX_STORE_RETRY_ATTEMPTS = 3;
++const storeRetryAttempts = new WeakMap();
+ const useDebounce = () => {
+     const timers = new Map();
+     const runningExecutions = new Map();
+@@ -2157,14 +2159,22 @@
+         const run = async () => {
+             if (runningExecutions.has(id)) {
+                 // wait for previous execution to finish
+-                await runningExecutions.get(id);
++                try {
++                    await runningExecutions.get(id);
++                }
++                catch (error) {
++                    // A failed previous execution must not block this one.
++                }
+             }
+             timers.delete(id);
+             const execution = func();
+             runningExecutions.set(id, execution);
+-            const executionResult = await execution;
+-            runningExecutions.delete(id);
+-            return executionResult;
++            try {
++                return await execution;
++            }
++            finally {
++                runningExecutions.delete(id);
++            }
+         };
+         if (old === null || old === void 0 ? void 0 : old.timeout) {
+             clearTimeout(old.timeout);
+@@ -2497,19 +2507,33 @@
+     storeDocumentHooks(document, hookPayload, immediately) {
+         const debounceId = `onStoreDocument-${document.name}`;
+         return this.debouncer.debounce(debounceId, async () => {
++            let failed = false;
+             try {
+                 await document.saveMutex.runExclusive(async () => {
+                     await this.hooks("onStoreDocument", hookPayload);
+                     await this.hooks("afterStoreDocument", hookPayload);
+                 });
++                storeRetryAttempts.delete(document);
+             }
+             catch (error) {
+                 console.error("Caught error during storeDocumentHooks", error);
+                 if (error === null || error === void 0 ? void 0 : error.message) {
++                    failed = true;
+                     throw error;
+                 }
+             }
+             finally {
++                if (failed) {
++                    // Keep exactly one store armed after a failure: the next
++                    // debounce tick retries on its own, and a last close runs it
++                    // immediately through executeNow instead of dropping the
++                    // document as "already stored". The count bounds attempts.
++                    const attempts = (storeRetryAttempts.get(document) || 0) + 1;
++                    storeRetryAttempts.set(document, attempts);
++                    if (attempts <= MAX_STORE_RETRY_ATTEMPTS) {
++                        this.storeDocumentHooks(document, hookPayload);
++                    }
++                }
+                 setTimeout(() => {
+                     if (this.shouldUnloadDocument(document)) {
+                         this.unloadDocument(document);

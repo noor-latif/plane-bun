@@ -20,6 +20,7 @@
     }
   },
   "ignorePatterns": [
+    "benchmarks/**",
     ".cache/**",
     ".next/**",
     ".react-router/**",

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "skipLibCheck": true,
+    "types": ["node"],
+    "typeRoots": ["../../apps/live/node_modules/@types"],
+    "paths": {
+      "yjs": ["../../packages/editor/node_modules/yjs"],
+      "@hocuspocus/provider": ["../../packages/editor/node_modules/@hocuspocus/provider"],
+      "zod": ["../../apps/live/node_modules/zod"]
+    }
+  },
+  "include": ["*.ts", "probe/*.ts"]
+}

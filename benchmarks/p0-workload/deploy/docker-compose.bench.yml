@@ -1,0 +1,122 @@
+# Compose override for the isolated P0 benchmark stack.
+# Pair with the ROOT docker-compose.yml: this file only renames/isolates —
+# service build definitions, entrypoints and dependencies stay canonical.
+# Proxy host ports come from the root compose's ${LISTEN_HTTP(S)_PORT}
+# interpolation, fed by --env-file deploy/plane-bench.env (8080/8443) and are
+# overridden here to bind loopback-only — this stack does not inherit the
+# root compose's all-interfaces publication.
+
+x-reference: &reference
+  cgroup_parent: plane-bench-reference.slice
+
+services:
+  web:
+    <<: *reference
+    container_name: plane-bench-web
+    restart: "no"
+
+  admin:
+    <<: *reference
+    container_name: plane-bench-admin
+    restart: "no"
+
+  space:
+    <<: *reference
+    container_name: plane-bench-space
+    restart: "no"
+
+  api:
+    <<: *reference
+    container_name: plane-bench-api
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/api.env
+
+  worker:
+    <<: *reference
+    container_name: plane-bench-worker
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/api.env
+    # Reference sizing is explicit because quota does not change CPU discovery.
+    environment:
+      CELERY_WORKER_CONCURRENCY: ${BENCH_WORKER_CONCURRENCY:?set baseline worker concurrency explicitly}
+
+  beat-worker:
+    <<: *reference
+    container_name: plane-bench-beat
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/api.env
+
+  migrator:
+    <<: *reference
+    container_name: plane-bench-migrator
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/api.env
+
+  live:
+    <<: *reference
+    container_name: plane-bench-live
+    restart: "no"
+    # Root compose defines no environment for live; the bench stack supplies it.
+    env_file:
+      - benchmarks/p0-workload/deploy/live.env
+
+  plane-db:
+    <<: *reference
+    container_name: plane-bench-db
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/db.env
+
+  plane-redis:
+    <<: *reference
+    container_name: plane-bench-redis
+    restart: "no"
+
+  plane-mq:
+    <<: *reference
+    container_name: plane-bench-mq
+    # RabbitMQ's on-disk node directory must survive container recreation.
+    hostname: plane-bench-mq
+    restart: "no"
+    env_file:
+      - benchmarks/p0-workload/deploy/mq.env
+    # Loopback-only management API so the runner can sample queue depth
+    # (rabbitDepth() -> http://127.0.0.1:15672). 15672 was free at preflight.
+    ports:
+      - "127.0.0.1:15672:15672"
+
+  plane-minio:
+    <<: *reference
+    container_name: plane-bench-minio
+    restart: "no"
+
+  proxy:
+    <<: *reference
+    container_name: plane-bench-proxy
+    restart: "no"
+    # Caddyfile.ce keys its site block on {$SITE_ADDRESS}; the root compose
+    # never forwards it, so declare it here (aio default ":80").
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    # Loopback-only; never on tailscale or all-interfaces. `ports:` MERGES in
+    # compose, so the root wildcard 0.0.0.0 entries stay unless overridden:
+    # `ports: !override []` drops them (compose v2.24+) — the array below is
+    # the full effective set. Verified: rendered config has exactly these two
+    # loopback-only mappings.
+    ports: !override
+      - "127.0.0.1:${LISTEN_HTTP_PORT}:80"
+      - "127.0.0.1:${LISTEN_HTTPS_PORT}:443"
+
+volumes:
+  pgdata:
+    name: plane-bench_bench_pgdata
+  redisdata:
+    name: plane-bench_bench_redisdata
+  rabbitmq_data:
+    name: plane-bench_bench_rabbitmq
+  uploads:
+    name: plane-bench_bench_uploads

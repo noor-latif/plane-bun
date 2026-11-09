@@ -1,0 +1,29 @@
+--- a/@hocuspocus/server/dist/hocuspocus-server.esm.js
++++ b/@hocuspocus/server/dist/hocuspocus-server.esm.js
+@@ -2157,14 +2157,22 @@
+         const run = async () => {
+             if (runningExecutions.has(id)) {
+                 // wait for previous execution to finish
+-                await runningExecutions.get(id);
++                try {
++                    await runningExecutions.get(id);
++                }
++                catch (error) {
++                    // A failed previous execution must not block this one.
++                }
+             }
+             timers.delete(id);
+             const execution = func();
+             runningExecutions.set(id, execution);
+-            const executionResult = await execution;
+-            runningExecutions.delete(id);
+-            return executionResult;
++            try {
++                return await execution;
++            }
++            finally {
++                runningExecutions.delete(id);
++            }
+         };
+         if (old === null || old === void 0 ? void 0 : old.timeout) {
+             clearTimeout(old.timeout);

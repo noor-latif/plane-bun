@@ -1,0 +1,56 @@
+--- a/apps/api/plane/utils/paginator.py
++++ b/apps/api/plane/utils/paginator.py
+@@ -210,8 +210,11 @@
+         *args,
+         **kwargs,
+     ):
+-        # Initiate the parent class for all the parameters
+-        super().__init__(queryset, *args, **kwargs)
++        # Initiate the parent class for all the parameters. The counting
++        # queryset was accepted but dropped before, so grouped pagination
++        # counted the fully annotated window query instead of the caller's
++        # pre-annotation queryset.
++        super().__init__(queryset, total_count_queryset=total_count_queryset, *args, **kwargs)
+ 
+         # Set the group by field name
+         self.group_by_field_name = group_by_field_name
+@@ -275,7 +278,11 @@
+         prev_cursor = Cursor(limit, page - 1, True, page > 0)
+ 
+         # Count the queryset
+-        count = queryset.count()
++        count = (
++            self.total_count_queryset.count()
++            if self.total_count_queryset is not None
++            else queryset.count()
++        )
+ 
+         # Optionally, calculate the total count and max_hits if needed
+         # This might require adjustments based on specific use cases
+@@ -408,8 +415,11 @@
+         *args,
+         **kwargs,
+     ):
+-        # Initiate the parent class for all the parameters
+-        super().__init__(queryset, *args, **kwargs)
++        # Initiate the parent class for all the parameters. The counting
++        # queryset was accepted but dropped before, so grouped pagination
++        # counted the fully annotated window query instead of the caller's
++        # pre-annotation queryset.
++        super().__init__(queryset, total_count_queryset=total_count_queryset, *args, **kwargs)
+ 
+         # Set the group by field name
+         self.group_by_field_name = group_by_field_name
+@@ -478,7 +488,11 @@
+         prev_cursor = Cursor(limit, page - 1, True, page > 0)
+ 
+         # Count the queryset
+-        count = queryset.count()
++        count = (
++            self.total_count_queryset.count()
++            if self.total_count_queryset is not None
++            else queryset.count()
++        )
+ 
+         # Optionally, calculate the total count and max_hits if needed
+         # This might require adjustments based on specific use cases

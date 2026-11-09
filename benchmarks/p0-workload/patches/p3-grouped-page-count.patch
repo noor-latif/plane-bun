@@ -1,0 +1,47 @@
+--- a/apps/api/plane/utils/paginator.py
++++ b/apps/api/plane/utils/paginator.py
+@@ -60,16 +60,19 @@
+ 
+ 
+ class CursorResult(Sequence):
+-    def __init__(self, results, next, prev, hits=None, max_hits=None):
++    def __init__(self, results, next, prev, hits=None, max_hits=None, length=None):
+         self.results = results
+         self.next = next
+         self.prev = prev
+         self.hits = hits
+         self.max_hits = max_hits
++        # Exact row count when the paginator already computed it; len() must not
++        # force a query the paginator deliberately left unevaluated.
++        self.length = length
+ 
+     def __len__(self):
+         # Return the length of the results
+-        return len(self.results)
++        return self.length if self.length is not None else len(self.results)
+ 
+     def __iter__(self):
+         # Return the iterator of the results
+@@ -277,9 +280,13 @@
+         # Count the queryset
+         count = queryset.count()
+ 
++        # Exact page length without materializing up to `limit + 1` rows per
++        # group that the caller re-fetches through `.values()` for the payload.
++        page_count = results.count()
++
+         # Optionally, calculate the total count and max_hits if needed
+         # This might require adjustments based on specific use cases
+-        if results:
++        if page_count:
+             max_hits = math.ceil(
+                 queryset.values(self.group_by_field_name)
+                 .annotate(count=Count("id", filter=self.count_filter, distinct=True))
+@@ -294,6 +301,7 @@
+             prev=prev_cursor,
+             hits=count,
+             max_hits=max_hits,
++            length=page_count,
+         )
+ 
+     def __get_total_queryset(self):

@@ -1,0 +1,4 @@
+# Generated credentials from seed/setup.sh — never commit.
+user.json
+dataset.json
+reference-state*/
