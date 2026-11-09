@@ -126,3 +126,6 @@ packages/i18n/src/types/keys.generated.ts
 .flox/run/
 .flox/log/
 .flox/cache/
+
+# Local benchmark evidence (kept out of git; see WALKTHROUGH M16)
+/bench-results/
